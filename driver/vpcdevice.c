@@ -12,7 +12,7 @@
 #include <linux/usb/input.h>
 
 #include "vpccommon.h"
-#include "vpcdevice_driver.h"
+#include "vpcdevice.h"
 
 /*
  * Version Information
