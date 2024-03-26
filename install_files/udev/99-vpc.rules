@@ -1,0 +1,24 @@
+ACTION!="add", GOTO="vpc_end"
+SUBSYSTEMS=="usb|input|hid", ATTRS{idVendor}=="3344", GOTO="vpc_vendor"
+GOTO="vpc_end"
+
+LABEL="vpc_vendor"
+
+# Hardware
+ATTRS{idProduct}=="0197|01f8|4138|838f", \
+    ATTRS{idVendor}=="3344", \
+    ENV{ID_VPC_DEVICE}="1", ENV{VPC_DRIVER}="vpcdevice"
+
+# Get out if no match
+ENV{ID_VPC_DEVICE}!="1", GOTO="vpc_end"
+
+# Set permissions if this is an input node
+SUBSYSTEM=="usb|input|hid", GROUP:="plugdev"
+
+# We're done unless it's the hid node
+SUBSYSTEM!="hid|usb", GOTO="vpc_end"
+
+# Rebind if needed
+SUBSYSTEM=="hid|usb", RUN+="vpc_mount $env{VPC_DRIVER} $kernel"
+
+LABEL="vpc_end"
