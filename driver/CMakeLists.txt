@@ -33,7 +33,7 @@ set(KBUILD_CMD $(MAKE) -C ${KERNELHEADERS_DIR} modules M=${CMAKE_CURRENT_BINARY_
 # Generate the Kbuild file through cmake.
 FILE(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/Kbuild
         "obj-m := openvpc.o
-vpcdevice-y := vpcdevice.o vpccommon.o")
+openvpc-y := vpcdevice.o vpccommon.o")
 
 add_custom_command(OUTPUT ${DRIVER_FILE}
         COMMAND ${KBUILD_CMD}
