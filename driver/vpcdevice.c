@@ -12,7 +12,7 @@
 #include <linux/usb/input.h>
 
 #include "vpccommon.h"
-#include "vpcdevice_driver.h"
+#include "vpcdevice.h"
 
 /*
  * Version Information
@@ -75,13 +75,38 @@ static int vpc_send_payload(struct vpc_device *device, struct vpc_report *reques
         return err;
     }
 
-    // switch (response->feature_id) {
-    //     default:
-    //         print_erroneous_report(response, "vpcdevice", "Response recvd");
-    //         break;
-    // }
+    return 0;
+}
+
+static int vpc_send_payload_disc_device(struct vpc_device *device, unsigned char index,
+                                        struct usb_device_descriptor *response) {
+    int err;
+
+    mutex_lock(&device->lock);
+    err = vpc_get_usb_discriptor_device(device->usb_dev, index, response);
+    mutex_unlock(&device->lock);
+    if (err) {
+        // print_erroneous_report(response, "vpcdevice", "Invalid discriptor_device Length");
+        printk(KERN_WARNING "vpcdevice: Invalid discriptor_device Length.\n");
+        return err;
+    }
 
     return 0;
+}
+
+static int vpc_send_payload_disc_string(struct vpc_device *device, unsigned char index, unsigned char *response) {
+    int len;
+
+    mutex_lock(&device->lock);
+    len = vpc_get_usb_discriptor_string(device->usb_dev, index, response);
+    mutex_unlock(&device->lock);
+    if (len < 0) {
+        // print_erroneous_report(response, "vpcdevice", "Invalid discriptor_string Length");
+        printk(KERN_WARNING "vpcdevice: Invalid discriptor_string Length.\n");
+        return len;
+    }
+
+    return len;
 }
 
 /**
@@ -100,15 +125,40 @@ static ssize_t vpc_attr_write_test(struct device *dev, struct device_attribute *
  */
 static ssize_t vpc_attr_read_test(struct device *dev, struct device_attribute *attr, char *buf) {
     struct vpc_device *device = dev_get_drvdata(dev);
-    struct vpc_report request = {0};
-    struct vpc_report response = {0};
+    unsigned char response[USB_MAX_STRING_LEN] = {0};
 
-    request = get_vpc_report(0x03, REPORT_MODE);
+    int len = vpc_send_payload_disc_string(device, VPC_DESC_STRING_NAME, response);
+    if (len > 0)
+        sprintf(buf, "%s\n", response);
 
-    vpc_send_payload(device, &request, &response);
+    return len;
+}
 
-    print_erroneous_report(&response, "vpcdevice", "Test");
-    return sprintf(buf, "%02x%02x\n", response.data.arguments[0], response.data.arguments[0]);
+static ssize_t vpc_attr_read_device_string(struct device *dev, unsigned char index, char *buf) {
+    struct vpc_device *device = dev_get_drvdata(dev);
+    unsigned char response[USB_MAX_STRING_LEN] = {0};
+
+    int len = vpc_send_payload_disc_string(device, index, response);
+    if (len > 0)
+        sprintf(buf, "%s\n", response);
+
+    return len;
+}
+
+static ssize_t vpc_attr_read_device_checksum(struct device *dev, struct device_attribute *attr, char *buf) {
+    return vpc_attr_read_device_string(dev, VPC_DESC_STRING_CHECKSUM, buf);
+}
+
+static ssize_t vpc_attr_read_device_firmware_id(struct device *dev, struct device_attribute *attr, char *buf) {
+    return vpc_attr_read_device_string(dev, VPC_DESC_STRING_FIRMWARE_ID, buf);
+}
+
+static ssize_t vpc_attr_read_device_name(struct device *dev, struct device_attribute *attr, char *buf) {
+    return vpc_attr_read_device_string(dev, VPC_DESC_STRING_NAME, buf);
+}
+
+static ssize_t vpc_attr_read_device_uniq(struct device *dev, struct device_attribute *attr, char *buf) {
+    return vpc_attr_read_device_string(dev, VPC_DESC_STRING_UNIQ, buf);
 }
 
 /**
@@ -195,12 +245,16 @@ static ssize_t vpc_attr_read_device_type(struct device *dev, struct device_attri
  * Set up the device driver files
 
  *
- * Read only is 0444
+ * Read only is 0440
  * Write only is 0220
  * Read and write is 0660
  */
 static DEVICE_ATTR(test, 0660, vpc_attr_read_test, vpc_attr_write_test);
 static DEVICE_ATTR(device_type, 0440, vpc_attr_read_device_type, NULL);
+// static DEVICE_ATTR(device_checksum, 0440, vpc_attr_read_device_checksum, NULL);
+static DEVICE_ATTR(device_firmware_name, 0440, vpc_attr_read_device_firmware_id, NULL);
+static DEVICE_ATTR(device_name, 0440, vpc_attr_read_device_name, NULL);
+static DEVICE_ATTR(device_uniq, 0440, vpc_attr_read_device_uniq, NULL);
 static DEVICE_ATTR(shift_mode, 0660, vpc_attr_read_shift_mode, vpc_attr_write_shift_mode);
 
 
@@ -277,6 +331,11 @@ static int vpc_device_probe(struct hid_device *hdev, const struct hid_device_id 
         CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_test); // Test mode
         CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_device_type); // Get string of device type
         CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_shift_mode); // Shift mode
+
+        // CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_device_checksum);
+        CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_device_firmware_name);
+        CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_device_name);
+        CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_device_uniq);
     }
 
     hid_set_drvdata(hdev, dev);
@@ -308,11 +367,15 @@ static void vpc_device_disconnect(struct hid_device *hdev) {
 
     dev = hid_get_drvdata(hdev);
 
-    // TODO: Remove device files
     if (intf->cur_altsetting->desc.bInterfaceProtocol == 0x00) {
         device_remove_file(&hdev->dev, &dev_attr_test); // Test mode
         device_remove_file(&hdev->dev, &dev_attr_device_type); // Get string of device type
         device_remove_file(&hdev->dev, &dev_attr_shift_mode); // Shift mode
+
+        // device_remove_file(&hdev->dev, &dev_attr_device_checksum);
+        device_remove_file(&hdev->dev, &dev_attr_device_firmware_name);
+        device_remove_file(&hdev->dev, &dev_attr_device_name);
+        device_remove_file(&hdev->dev, &dev_attr_device_uniq);
     }
 
     hid_hw_stop(hdev);
@@ -350,13 +413,13 @@ MODULE_DEVICE_TABLE(hid, vpc_devices);
  * Describes the contents of the driver
  */
 static struct hid_driver vpc_device_driver = {
-        .name = "vpcdevice",
+        .name = "openvpc",
         .id_table = vpc_devices,
-        .input_mapping = vpc_device_input_mapping,
         .probe = vpc_device_probe,
         .remove = vpc_device_disconnect,
         .event = vpc_event,
         .raw_event = vpc_raw_event,
+        .input_mapping = vpc_device_input_mapping,
         .input_configured = vpc_input_configured,
 };
 

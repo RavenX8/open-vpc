@@ -1,4 +1,4 @@
-set(NAME vpcdevice)
+set(NAME openvpc)
 project(${NAME} C)
 
 # Module info
@@ -32,14 +32,14 @@ set(KBUILD_CMD $(MAKE) -C ${KERNELHEADERS_DIR} modules M=${CMAKE_CURRENT_BINARY_
 
 # Generate the Kbuild file through cmake.
 FILE(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/Kbuild
-        "obj-m := vpcdevice.o
-vpcdevice-y := vpcdevice_driver.o vpccommon.o")
+        "obj-m := openvpc.o
+openvpc-y := vpcdevice.o vpccommon.o")
 
 add_custom_command(OUTPUT ${DRIVER_FILE}
         COMMAND ${KBUILD_CMD}
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        DEPENDS vpcdevice_driver.c vpccommon.c VERBATIM)
+        DEPENDS vpcdevice.c vpccommon.c VERBATIM)
 
 add_custom_target(driver ALL DEPENDS ${DRIVER_FILE})
 # Parse c files
-add_library(dummy_target vpcdevice_driver.c vpccommon.c)
+add_library(dummy_target vpcdevice.c vpccommon.c)

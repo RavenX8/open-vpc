@@ -35,12 +35,12 @@ goto exit_free; \
 #define VPC_USB_REPORT_FIRMWARE_LEN 0x64
 #define VPC_USB_REPORT_MODE_LEN 0x03
 
-// Report Responses
-#define VPC_CMD_BUSY          0x01
-#define VPC_CMD_SUCCESSFUL    0x02
-#define VPC_CMD_FAILURE       0x03
-#define VPC_CMD_TIMEOUT       0x04
-#define VPC_CMD_NOT_SUPPORTED 0x05
+#define VPC_DESC_DEVICE_MAIN 0x00
+
+#define VPC_DESC_STRING_CHECKSUM 0x00
+#define VPC_DESC_STRING_FIRMWARE_ID 0x01
+#define VPC_DESC_STRING_NAME 0x02
+#define VPC_DESC_STRING_UNIQ 0x03 // Not sure what this is for. Always is 0xFF
 
 enum vpc_report_id {
     REPORT_FIRMWARE = 0x02,
@@ -59,6 +59,8 @@ struct vpc_report {
     struct vpc_report_data data;
 };
 
+int vpc_get_usb_discriptor_device(struct usb_device *usb_dev, unsigned char index, struct usb_device_descriptor* response);
+int vpc_get_usb_discriptor_string(struct usb_device *usb_dev, unsigned char index, unsigned char* response);
 int vpc_send_control_msg(struct usb_device *usb_dev,struct vpc_report const *data, unsigned int report_index, unsigned long wait_min, unsigned long wait_max);
 int vpc_get_usb_response(struct usb_device *usb_dev, uint report_index, struct vpc_report* request_report, unsigned int response_index, struct vpc_report* response_report, unsigned long wait_min, unsigned long wait_max);
 struct vpc_report get_vpc_report(unsigned char report_id, unsigned char feature);

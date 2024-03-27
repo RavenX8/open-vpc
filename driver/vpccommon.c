@@ -122,6 +122,52 @@ int vpc_get_usb_response(struct usb_device *usb_dev, uint report_index, struct v
     return result;
 }
 
+int vpc_get_usb_discriptor_device(struct usb_device *usb_dev,  unsigned char index, struct usb_device_descriptor* response) {
+    int len = 0;
+    int result = 0;
+    char *buf = NULL;
+
+    buf = kzalloc(USB_DT_DEVICE_SIZE, GFP_KERNEL);
+    if (buf == NULL)
+        return -ENOMEM;
+
+    len = usb_get_descriptor(usb_dev, USB_DT_DEVICE, index, buf, USB_DT_DEVICE_SIZE);
+
+    if(len < 0) {
+        printk(KERN_WARNING "vpcdriver: Invalid USB response. USB Response length: %d\n", len);
+        result = 1;
+    }
+    else {
+        memcpy(&response, buf, len);
+    }
+
+    kfree(buf);
+    return result;
+}
+
+int vpc_get_usb_discriptor_string(struct usb_device *usb_dev, unsigned char index, unsigned char* response) {
+    int len = 0;
+    int result = 0;
+    char *buf = NULL;
+
+    buf = kzalloc(USB_MAX_STRING_LEN, GFP_KERNEL);
+    if (buf == NULL)
+        return -ENOMEM;
+
+    len = usb_string(usb_dev, index, buf, USB_MAX_STRING_LEN);
+
+    if(len < 0) {
+        printk(KERN_WARNING "vpcdriver: Invalid USB response. USB Response length: %d\n", len);
+        result = -1;
+    }
+    else {
+        memcpy(response, buf, len <= USB_MAX_STRING_LEN ? len : USB_MAX_STRING_LEN);
+    }
+
+    kfree(buf);
+    return len;
+}
+
 /**
  * Get initialised vpc report
  */
