@@ -17,9 +17,21 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
+    - name: Update apt
+      run: sudo apt update
+
     - name: Install dependencies
-      run: sudo apt install -y libudev-dev
-      
+      run: | 
+        sudo apt install -y libudev-dev curl
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
+        . "$HOME/.cargo/env"
+        cargo --version
+
     - name: Build
-      run: make
-      
+      run: |
+        . "$HOME/.cargo/env"
+        make
+
+    - name: Upload
+      run:
+        echo "Uploading artifacts"
