@@ -17,7 +17,7 @@ DKMS_VER?=0.1.0
 
 
 # Build all target
-all: driver
+all: tools
 
 # Driver compilation
 driver:
@@ -30,7 +30,17 @@ driver_clean:
 	@echo "========================================"
 	$(MAKE) -C "$(KERNELDIR)" M="$(DRIVERDIR)" clean
 
-# Clean target
-clean: driver_clean
+tools:
+	@echo -e "\n::\033[32m Compiling OpenVPC tools\033[0m"
+	@echo "========================================"
+	$(MAKE) -C "$(shell pwd)/tools"
 
-.PHONY: driver
+tools_clean:
+	@echo -e "\n::\033[32m Cleaning OpenVPC tools\033[0m"
+	@echo "========================================"
+	$(MAKE) -C "$(shell pwd)/tools" clean
+
+# Clean target
+clean: driver_clean tools_clean
+
+.PHONY: driver tools
