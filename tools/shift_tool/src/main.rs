@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
-use eframe::egui;
+use eframe::{egui, glow};
 use hidapi::HidApi;
 
 #[derive(Parser, Debug)]
@@ -20,7 +20,7 @@ struct Args {
     skip_firmware: bool,
 }
 
-fn main() -> eframe::Result<()>{
+fn main() -> eframe::Result<()> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
     let _ = Args::parse();
 
@@ -68,7 +68,6 @@ fn is_supported(input: String) -> bool {
 struct VpcDevice {
     path: String,
     name: Rc<String>,
-    shift_mode: [bool; 8],
     firmware: Rc<String>,
 }
 
@@ -226,6 +225,20 @@ impl MyApp {
 
 
 impl eframe::App for MyApp {
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        println!("Exiting Window...");
+        // Make sure we clean up our thread
+        {
+            let &(ref lock, ref cvar) = &*self.run_state;
+            let mut started = lock.lock().unwrap();
+            *started = false;
+            cvar.notify_all();
+        }
+        // Give the thread some time to get the shutdown event
+        thread::sleep(Duration::from_millis(200));
+        println!("Done");
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let thread_running;
         {
@@ -264,7 +277,7 @@ impl eframe::App for MyApp {
             }
             if !found {
                 if is_supported(firmware_string.to_owned().into()) {
-                    new_devices.push(VpcDevice { path: device_path.into(), name: device_name.to_owned().into(), shift_mode: [false; 8], firmware: firmware_string.to_owned().into() });
+                    new_devices.push(VpcDevice { path: device_path.into(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into() });
                 }
             }
         }
@@ -280,12 +293,12 @@ impl eframe::App for MyApp {
             merged_list.sort_by(|a, b| a.path.cmp(&b.path));
             merged_list.dedup_by(|a, b| a.path.eq(&b.path));
 
-            merged_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), shift_mode: [false; 8], firmware: String::from("").into() });
+            merged_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
             self.device_list = merged_list.clone();
         }
 
         if self.device_list.is_empty() {
-            self.device_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), shift_mode: [false; 8], firmware: String::from("").into() });
+            self.device_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -325,9 +338,15 @@ impl eframe::App for MyApp {
                             // println!("{:02x} {}", state, shift);
                             let _ = ui.selectable_label(shift, format!("{}", i + 1));
                         }
-                        let _ = ui.selectable_label(false, "DTNT");
-                        let _ = ui.selectable_label(false, "ZOOM");
-                        let _ = ui.selectable_label(false, "TRIM");
+
+                        // I'm not sure if these are actually the correct bits for these three
+                        let dtnt = read_bit(state, 6);
+                        let zoom = read_bit(state, 7);
+                        let trim = read_bit(state, 8);
+
+                        let _ = ui.selectable_label(dtnt, "DTNT");
+                        let _ = ui.selectable_label(zoom, "ZOOM");
+                        let _ = ui.selectable_label(trim, "TRIM");
                     }
                 });
 
@@ -374,10 +393,20 @@ impl eframe::App for MyApp {
                 }
 
                 if columns[1].button("Add Receiver").clicked() {
-                    self.receiver_list.push(0);
+                    if !thread_running {
+                        self.receiver_list.push(0);
+                    }
+                }
+                if columns[1].button("Remove Receiver").clicked() {
+                    if !thread_running {
+                        self.receiver_list.pop();
+                    }
+                }
+                if columns[1].button("Exit").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
         });
-        // thread::sleep(Duration::from_millis(10));
+        ctx.request_repaint_after(Duration::ZERO);
     }
 }
