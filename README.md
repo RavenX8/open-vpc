@@ -1,6 +1,8 @@
-# VPCDriver
+# OpenVPC project
 
-A linux driver for Virpil devices.
+This project aims to support virpil control devices by recreating the windows software in an open source driver and tools.
+
+Currently the driver is a WIP. the shift tool is functionally complete.
 
 ## Device Support
 
