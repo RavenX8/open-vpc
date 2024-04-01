@@ -1,6 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod about;
+
 // hide console window on Windows in release
 extern crate hidapi;
+
+#[cfg(feature = "logging")]
+use log::{error, info, debug, trace};
 
 use std::ffi::CString;
 use std::rc::Rc;
@@ -24,6 +30,10 @@ fn main() -> eframe::Result<()> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
     let _ = Args::parse();
 
+    #[cfg(feature = "logging")] {
+        info!("Creating main window...");
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([700.0, 240.0]),
         ..Default::default()
@@ -32,17 +42,13 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "OpenVPC - Shift Tool",
         options,
-        Box::new(|_cc| Box::new(MyApp::default())),
+        Box::new(|_cc| Box::new(ShiftTool::default())),
     )
 }
 
 fn read_bit(value: u16, position: u8) -> bool {
     (value & (1 << position)) != 0
 }
-
-// fn set_bit(value: u16, position: u8) -> u16 {
-//     value | (1 << position)
-// }
 
 fn merge_u8_into_u16(high: u8, low: u8) -> u16 {
     // Shift `high` to the left by 8 bits and combine it with `low`
@@ -77,7 +83,7 @@ impl std::fmt::Display for VpcDevice {
     }
 }
 
-struct MyApp {
+struct ShiftTool {
     device_list: Vec<VpcDevice>,
     source_path: String,
     shift_state: Arc<(Mutex<u16>, Condvar)>,
@@ -86,7 +92,7 @@ struct MyApp {
     hidapi: HidApi,
 }
 
-impl Default for MyApp {
+impl Default for ShiftTool {
     fn default() -> Self {
         Self {
             device_list: vec![],
@@ -99,7 +105,7 @@ impl Default for MyApp {
     }
 }
 
-impl MyApp {
+impl ShiftTool {
     fn spawn_worker(&mut self) {
         let reference_to_self = self;
         let shared_shift_state = reference_to_self.shift_state.clone();
@@ -109,22 +115,30 @@ impl MyApp {
         match hidapi.reset_devices() {
             Ok(_api) => {}
             Err(e) => {
-                eprintln!("Error: {}", e);
+                #[cfg(feature = "logging")] {
+                    error!("Error: {}", e);
+                }
             }
         };
         match hidapi.add_devices(0x3344, 0) {
             Ok(_api) => {
-                println!("Got devices");
+                #[cfg(feature = "logging")] {
+                    debug!("Got devices");
+                }
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
+                #[cfg(feature = "logging")] {
+                    error!("Error: {}", e);
+                }
             }
         }
 
         let hid_source_device = match hidapi.open_path(source_device.as_ref()) {
             Ok(device) => device,
             Err(_) => {
-                eprintln!("Was unable to open the source device {:?}", source_device);
+                #[cfg(feature = "logging")] {
+                    error!("Was unable to open the source device {:?}", source_device);
+                }
                 return;
             }
         };
@@ -135,7 +149,9 @@ impl MyApp {
             let receiver_path = match CString::new(&*reference_to_self.device_list[reference_to_self.receiver_list[i]].path.clone()) {
                 Ok(str) => str,
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    #[cfg(feature = "logging")] {
+                        error!("Error: {}", e);
+                    }
                     continue;
                 }
             };
@@ -149,7 +165,9 @@ impl MyApp {
         }
 
 
-        println!("Launching Thread...");
+        #[cfg(feature = "logging")] {
+            trace!("Launching Thread...");
+        }
         thread::spawn(move || {
             let mut buf: [u8; 3] = [0; 3];
             let &(ref lock, ref _cvar) = &*shared_run_state;
@@ -171,12 +189,11 @@ impl MyApp {
                 // Now that we unlocked the lock we can continue working
 
                 // Do some work
-                // println!("Working...");
                 buf[0] = 0x04;
                 match hid_source_device.get_feature_report(&mut buf) {
                     Ok(bytes_written) => bytes_written,
                     Err(e) => {
-                        eprintln!("{}", e);
+                        error!("{}", e);
 
                         let mut started = match lock.try_lock() {
                             Ok(guard) => guard,
@@ -217,16 +234,19 @@ impl MyApp {
                 // Sleep for 200 milliseconds
                 thread::sleep(Duration::from_millis(200));
             }
-
-            println!("Exiting Thread...");
+            #[cfg(feature = "logging")] {
+                trace!("Exiting Thread...");
+            }
         });
     }
 }
 
 
-impl eframe::App for MyApp {
+impl eframe::App for ShiftTool {
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
-        println!("Exiting Window...");
+        #[cfg(feature = "logging")] {
+            info!("Shutting down...");
+        }
         // Make sure we clean up our thread
         {
             let &(ref lock, ref cvar) = &*self.run_state;
@@ -236,7 +256,9 @@ impl eframe::App for MyApp {
         }
         // Give the thread some time to get the shutdown event
         thread::sleep(Duration::from_millis(200));
-        println!("Done");
+        #[cfg(feature = "logging")] {
+            info!("Done");
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -252,13 +274,13 @@ impl eframe::App for MyApp {
         match self.hidapi.reset_devices() {
             Ok(_api) => {}
             Err(e) => {
-                eprintln!("Error: {}", e);
+                error!("Error: {}", e);
             }
         };
         match self.hidapi.add_devices(0x3344, 0) {
             Ok(_api) => {}
             Err(e) => {
-                eprintln!("Error: {}", e);
+                error!("Error: {}", e);
             }
         }
 
@@ -376,7 +398,9 @@ impl eframe::App for MyApp {
                         return;
                     }
 
-                    println!("Toggling run thread...");
+                    #[cfg(feature = "logging")] {
+                        trace!("Toggling run thread...");
+                    }
                     let is_started;
                     {
                         let &(ref lock, ref cvar) = &*self.run_state;
@@ -389,7 +413,9 @@ impl eframe::App for MyApp {
                     if !is_started {
                         self.spawn_worker();
                     }
-                    println!("Done");
+                    #[cfg(feature = "logging")] {
+                        trace!("Done");
+                    }
                 }
 
                 if columns[1].button("Add Receiver").clicked() {
@@ -401,6 +427,8 @@ impl eframe::App for MyApp {
                     if !thread_running {
                         self.receiver_list.pop();
                     }
+                }
+                if columns[1].button("Save").clicked() {
                 }
                 if columns[1].button("Exit").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
