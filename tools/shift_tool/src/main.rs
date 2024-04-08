@@ -1,12 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod about;
-
 // hide console window on Windows in release
 extern crate hidapi;
-
-#[cfg(feature = "logging")]
-use log::{error, info, debug, trace};
 
 use std::ffi::CString;
 use std::rc::Rc;
@@ -16,7 +11,23 @@ use std::time::Duration;
 
 use clap::Parser;
 use eframe::{egui, glow};
+use eframe::egui::{Context, Ui};
 use hidapi::HidApi;
+#[cfg(feature = "logging")]
+use log::{debug, error, info, trace};
+
+mod about;
+
+const PROGRAM_TITLE: &str = "OpenVPC - Shift Tool";
+const INITIAL_WIDTH: f32 = 720.0;
+const INITIAL_HEIGHT: f32 = 260.0;
+
+#[derive(Copy, Clone, PartialEq)]
+enum State {
+    About,
+    Initialising,
+    Running,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -35,12 +46,13 @@ fn main() -> eframe::Result<()> {
     }
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([700.0, 240.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([INITIAL_WIDTH, INITIAL_HEIGHT]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "OpenVPC - Shift Tool",
+        PROGRAM_TITLE,
         options,
         Box::new(|_cc| Box::new(ShiftTool::default())),
     )
@@ -84,34 +96,140 @@ impl std::fmt::Display for VpcDevice {
 }
 
 struct ShiftTool {
+    state: State,
     device_list: Vec<VpcDevice>,
     source_path: String,
     shift_state: Arc<(Mutex<u16>, Condvar)>,
     receiver_list: Vec<usize>,
-    run_state: Arc<(Mutex<bool>, Condvar)>,
-    hidapi: HidApi,
+    thread_state: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Default for ShiftTool {
     fn default() -> Self {
         Self {
+            state: State::Initialising,
             device_list: vec![],
             shift_state: Arc::new((Mutex::new(0), Condvar::new())),
             source_path: "".to_string(),
             receiver_list: vec![],
-            run_state: Arc::new((Mutex::new(false), Condvar::new())),
-            hidapi: HidApi::new_without_enumerate().expect("Was unable to open hid instance"),
+            thread_state: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
 }
 
 impl ShiftTool {
-    fn spawn_worker(&mut self) {
+    fn about_screen(&mut self, ui: &mut Ui) {
+        let loading = self.state != State::About;
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.centered_and_justified(|ui| {
+                    let mut about = "";
+                    if !loading {
+                        about = "About ";
+                    }
+                    ui.heading(format!("{}{}", about, PROGRAM_TITLE, ));
+                });
+            });
+            if loading {
+                ui.horizontal(|ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.add(egui::Label::new("-- Loading, please wait --"));
+                    });
+                });
+            }
+            for line in about::about() {
+                ui.horizontal(|ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.add(egui::Label::new(line));
+                    });
+                });
+            }
+
+            if !loading {
+                ui.horizontal(|ui| {
+                    let blank: String = "         ".to_string();
+                    ui.centered_and_justified(|ui| {
+                        ui.label(&blank);
+                        if ui.button("OK")
+                            .clicked() {
+                            self.state = State::Running;
+                        }
+                        ui.label(&blank);
+                    });
+                });
+            }
+        });
+    }
+
+    fn init(&mut self) {
+        // Do some init stuff here
+        let hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
+        self.refresh_devices(hidapi);
+        self.state = State::Running;
+    }
+
+    fn refresh_devices(&mut self, mut hidapi: HidApi) {
+        match hidapi.reset_devices() {
+            Ok(_api) => {}
+            Err(e) => {
+                error!("Error: {}", e);
+            }
+        };
+        match hidapi.add_devices(0x3344, 0) {
+            Ok(_api) => {}
+            Err(e) => {
+                error!("Error: {}", e);
+            }
+        }
+
+        // if hidapi.device_list().count() != self.device_list.len() {
+        //     self.device_list.clear();
+        // }
+
+        let mut new_devices: Vec<VpcDevice> = vec![];
+        for device in hidapi.device_list() {
+            let firmware_string = device.manufacturer_string().unwrap_or_else(|| "");
+            let device_name = device.product_string().unwrap_or_else(|| "");
+            let device_path = device.path().to_str().expect("Invalid UTF-8").to_string();
+            let mut found = false;
+            if !self.device_list.is_empty() {
+                found = self.device_list.iter().any(|r| r.path == device_path.clone());
+            }
+            if !found {
+                if is_supported(firmware_string.to_owned().into()) {
+                    new_devices.push(VpcDevice { path: device_path.into(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into() });
+                }
+            }
+        }
+
+        if !new_devices.is_empty() {
+            if !self.device_list.is_empty() {
+                self.device_list.remove(0);
+            }
+
+            let mut merged_list = self.device_list.clone();
+            merged_list.extend(new_devices.into_iter());
+
+            merged_list.sort_by(|a, b| a.path.cmp(&b.path));
+            merged_list.dedup_by(|a, b| a.path.eq(&b.path));
+
+            merged_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
+            self.device_list = merged_list.clone();
+        }
+
+        if self.device_list.is_empty() {
+            self.device_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
+        }
+    }
+
+    fn spawn_worker(&mut self) -> bool {
         let reference_to_self = self;
         let shared_shift_state = reference_to_self.shift_state.clone();
-        let shared_run_state = reference_to_self.run_state.clone();
+        let shared_run_state = reference_to_self.thread_state.clone();
         let source_device = CString::new(&*reference_to_self.source_path.clone()).expect("Failed to create CString");
         let mut hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
+
+        // Clear out our device list
         match hidapi.reset_devices() {
             Ok(_api) => {}
             Err(e) => {
@@ -120,6 +238,7 @@ impl ShiftTool {
                 }
             }
         };
+        // Grab all virpil devices
         match hidapi.add_devices(0x3344, 0) {
             Ok(_api) => {
                 #[cfg(feature = "logging")] {
@@ -133,18 +252,22 @@ impl ShiftTool {
             }
         }
 
+        // Attempt to open the source device
         let hid_source_device = match hidapi.open_path(source_device.as_ref()) {
             Ok(device) => device,
             Err(_) => {
                 #[cfg(feature = "logging")] {
                     error!("Was unable to open the source device {:?}", source_device);
                 }
-                return;
+
+                return false;
             }
         };
         hid_source_device.set_blocking_mode(false).expect("unable to set source blocking mode");
 
+        // List of device handles for the thread to write to
         let mut receiver_devices = vec![];
+        // Loop for all receiver devices and open a handle to them
         for i in 0..reference_to_self.receiver_list.len() {
             let receiver_path = match CString::new(&*reference_to_self.device_list[reference_to_self.receiver_list[i]].path.clone()) {
                 Ok(str) => str,
@@ -169,6 +292,10 @@ impl ShiftTool {
             trace!("Launching Thread...");
         }
         thread::spawn(move || {
+            // Shift modes only return 2 bytes.
+            // byte[0] = report id
+            // byte[1..2]: u16 = shift mode. each bit rep each mode
+            // It might be possible to have multiple modes set at the same time, but I'm not sure
             let mut buf: [u8; 3] = [0; 3];
             let &(ref lock, ref _cvar) = &*shared_run_state;
 
@@ -205,6 +332,8 @@ impl ShiftTool {
                 };
 
                 {
+                    // notify the main gui of the current shift state.
+                    // This is only to show the current state on the GUI.
                     let &(ref lock2, ref _cvar2) = &*shared_shift_state;
                     // Attempt to acquire the lock
                     let mut shift = match lock2.try_lock() {
@@ -215,15 +344,18 @@ impl ShiftTool {
                 }
 
                 // println!("Sending data...");
+                // This sends the shift data read from the source device directly to the receivers
                 for device in &receiver_devices {
                     match device.send_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(e) => {
                             eprintln!("{}", e);
 
+                            // Since we got an error sending the data, lets stop the thread
+                            //TODO: Maybe we don't want to do this without letting the user know?
                             let mut started = match lock.try_lock() {
                                 Ok(guard) => guard,
-                                Err(_) => continue, // Retry if the lock couldn't be acquired immediately
+                                Err(_) => continue,
                             };
                             *started = false;
                             break;
@@ -238,94 +370,24 @@ impl ShiftTool {
                 trace!("Exiting Thread...");
             }
         });
-    }
-}
-
-
-impl eframe::App for ShiftTool {
-    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
-        #[cfg(feature = "logging")] {
-            info!("Shutting down...");
-        }
-        // Make sure we clean up our thread
-        {
-            let &(ref lock, ref cvar) = &*self.run_state;
-            let mut started = lock.lock().unwrap();
-            *started = false;
-            cvar.notify_all();
-        }
-        // Give the thread some time to get the shutdown event
-        thread::sleep(Duration::from_millis(200));
-        #[cfg(feature = "logging")] {
-            info!("Done");
-        }
+        return true;
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let thread_running;
+    fn run(&mut self, ui: &mut Ui, ctx: &Context) {
+        let thread_running: bool;
         {
             {
                 // Check to see if the worker thread is running
-                let &(ref lock, ref _cvar) = &*self.run_state;
+                let &(ref lock, ref _cvar) = &*self.thread_state;
                 thread_running = *(lock.lock().unwrap());
             }
         }
+        let hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
+        self.refresh_devices(hidapi);
 
-        match self.hidapi.reset_devices() {
-            Ok(_api) => {}
-            Err(e) => {
-                error!("Error: {}", e);
-            }
-        };
-        match self.hidapi.add_devices(0x3344, 0) {
-            Ok(_api) => {}
-            Err(e) => {
-                error!("Error: {}", e);
-            }
-        }
-
-        if self.hidapi.device_list().count() != self.device_list.len() {
-            self.device_list.clear();
-        }
-
-        let mut new_devices: Vec<VpcDevice> = vec![];
-        for device in self.hidapi.device_list() {
-            let firmware_string = device.manufacturer_string().unwrap_or_else(|| "");
-            let device_name = device.product_string().unwrap_or_else(|| "");
-            let device_path = device.path().to_str().expect("Invalid UTF-8").to_string();
-            let mut found = false;
-            if self.device_list.is_empty() {
-                found = self.device_list.iter().any(|r| r.path == device_path.clone());
-            }
-            if !found {
-                if is_supported(firmware_string.to_owned().into()) {
-                    new_devices.push(VpcDevice { path: device_path.into(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into() });
-                }
-            }
-        }
-
-        if !new_devices.is_empty() {
-            if !self.device_list.is_empty() {
-                self.device_list.remove(0);
-            }
-
-            let mut merged_list = self.device_list.clone();
-            merged_list.extend(new_devices.into_iter());
-
-            merged_list.sort_by(|a, b| a.path.cmp(&b.path));
-            merged_list.dedup_by(|a, b| a.path.eq(&b.path));
-
-            merged_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
-            self.device_list = merged_list.clone();
-        }
-
-        if self.device_list.is_empty() {
-            self.device_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
-        }
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("VPC Shift Tool");
-            ui.columns(2, |columns| {
+        ui.columns(
+            2,
+            |columns| {
                 columns[0].horizontal(|ui| {
                     let _ = ui.label("Source");
                     egui::ComboBox::from_id_source("Source")
@@ -361,7 +423,7 @@ impl eframe::App for ShiftTool {
                             let _ = ui.selectable_label(shift, format!("{}", i + 1));
                         }
 
-                        // I'm not sure if these are actually the correct bits for these three
+                        // I'm not sure which of these 3 bits rep which mode
                         let dtnt = read_bit(state, 6);
                         let zoom = read_bit(state, 7);
                         let trim = read_bit(state, 8);
@@ -403,7 +465,7 @@ impl eframe::App for ShiftTool {
                     }
                     let is_started;
                     {
-                        let &(ref lock, ref cvar) = &*self.run_state;
+                        let &(ref lock, ref cvar) = &*self.thread_state;
                         let mut started = lock.lock().unwrap();
                         is_started = *started;
                         *started = !*started;
@@ -411,7 +473,14 @@ impl eframe::App for ShiftTool {
                     }
 
                     if !is_started {
-                        self.spawn_worker();
+                        if !self.spawn_worker() {
+                            {
+                                let &(ref lock, ref cvar) = &*self.thread_state;
+                                let mut started = lock.lock().unwrap();
+                                *started = false;
+                                cvar.notify_all();
+                            }
+                        }
                     }
                     #[cfg(feature = "logging")] {
                         trace!("Done");
@@ -428,13 +497,53 @@ impl eframe::App for ShiftTool {
                         self.receiver_list.pop();
                     }
                 }
-                if columns[1].button("Save").clicked() {
+                // if columns[1].button("Save").clicked() {}
+                if columns[1].button("About").clicked() {
+                    self.state = State::About;
                 }
                 if columns[1].button("Exit").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-            });
-        });
+            }
+        );
+    }
+}
+
+
+impl eframe::App for ShiftTool {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::ZERO);
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::Resize::default()
+                .default_width(INITIAL_WIDTH)
+                .default_height(INITIAL_HEIGHT)
+                .auto_sized()
+                .show(ui, |ui| {
+                    match self.state {
+                        State::Initialising => self.init(),
+                        State::About => self.about_screen(ui),
+                        State::Running => self.run(ui, ctx),
+                    }
+                });
+        });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        #[cfg(feature = "logging")] {
+            info!("Shutting down...");
+        }
+        // Make sure we clean up our thread
+        {
+            let &(ref lock, ref cvar) = &*self.thread_state;
+            let mut started = lock.lock().unwrap();
+            *started = false;
+            cvar.notify_all();
+        }
+        // Give the thread some time to get the shutdown event
+        thread::sleep(Duration::from_millis(200));
+        #[cfg(feature = "logging")] {
+            info!("Done");
+        }
     }
 }

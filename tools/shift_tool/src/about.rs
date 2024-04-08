@@ -1,6 +1,6 @@
 pub fn about() -> [&'static str; 7] {
     [
-        "This program was designed to replicate the VPC Shift Tool functions\
+        "This program was designed to replicate the VPC Shift Tool functions \
         bundled with the VirPil control software package.",
         "\n",
         "Shift Tool Copyright (C) 2024 RavenX8",
@@ -9,6 +9,6 @@ pub fn about() -> [&'static str; 7] {
         under certain conditions.",
         "License: GNU General Public License v3.0",
         "Author: RavenX8",
-        "",
+        "https://github.com/RavenX8/open-vpc",
     ]
 }
