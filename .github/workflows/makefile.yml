@@ -36,7 +36,7 @@ jobs:
         make all
 
     - name: Prepare Release
-      working-directory: ${{github.workspace}}/target/$target/shift_tool
+      working-directory: ${{github.workspace}}/target/${{ env.target }}/shift_tool
       shell: bash
       run: tar --exclude='*.sym' --exclude='*.a' --exclude='./symbols' --exclude='./unity' -zcvf ${{github.workspace}}/${{ runner.os }}-${{ env.PROCESSOR_ARCH }}-shift_tool.tar.gz *
 
