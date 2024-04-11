@@ -7,6 +7,12 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
-eframe = "0.27.0"
+eframe = "0.27.1"
 env_logger = "0.11.3"
 hidapi = "2.6.1"
+log = "0.4.21"
+
+[features]
+logging = []
+
+default = ["logging"]
