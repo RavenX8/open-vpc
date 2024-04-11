@@ -38,7 +38,7 @@ jobs:
     - name: Prepare Release
       working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ env.target }}
       shell: bash
-      run: tar --exclude='./.fingerprint' --exclude='./build' --exclude='./deps' --exclude='./examples' --exclude='./incrementals' --exclude='*.d' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ runner.os }}-${{ env.PROCESSOR_ARCH }}-shift_tool.tar.gz *
+      run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ runner.os }}-${{ env.PROCESSOR_ARCH }}-shift_tool.tar.gz *
 
     - name: Upload linux build
       uses: actions/upload-artifact@v2
