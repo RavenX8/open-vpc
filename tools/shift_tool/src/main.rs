@@ -3,7 +3,6 @@
 // hide console window on Windows in release
 extern crate hidapi;
 
-use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -12,7 +11,7 @@ use std::time::Duration;
 use clap::Parser;
 use eframe::{egui, glow};
 use eframe::egui::{Context, Ui};
-use hidapi::HidApi;
+use hidapi::{DeviceInfo, HidApi};
 #[cfg(feature = "logging")]
 use log::{debug, error, info, trace};
 
@@ -81,12 +80,37 @@ fn is_supported(input: String) -> bool {
     fixed_list.contains(&input)
 }
 
+fn calculate_full_device_name(device_info: &DeviceInfo) -> String {
+    let full_name = format!("{:04x}:{:04x}:{}:{}", device_info.vendor_id(), device_info.product_id(), device_info.serial_number().unwrap_or_default(), device_info.usage());
+    full_name
+}
+
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Hash, Clone)]
 struct VpcDevice {
     path: String,
+    full_name: String,
     name: Rc<String>,
     firmware: Rc<String>,
+    vendor_id: u16,
+    product_id: u16,
+    serial_number: String,
+    usage: u16,
+}
+
+impl Default for VpcDevice {
+    fn default() -> Self {
+        Self {
+            path: String::from("").into(),
+            full_name: String::from("").into(),
+            name: String::from("-NO CONNECTION (Select device from the list)-").into(),
+            firmware: String::from("").into(),
+            vendor_id: 0,
+            product_id: 0,
+            serial_number: String::from(""),
+            usage: 0,
+        }
+    }
 }
 
 impl std::fmt::Display for VpcDevice {
@@ -98,8 +122,8 @@ impl std::fmt::Display for VpcDevice {
 struct ShiftTool {
     state: State,
     device_list: Vec<VpcDevice>,
-    source_path: String,
     shift_state: Arc<(Mutex<u16>, Condvar)>,
+    source_list: Vec<usize>,
     receiver_list: Vec<usize>,
     thread_state: Arc<(Mutex<bool>, Condvar)>,
 }
@@ -110,7 +134,7 @@ impl Default for ShiftTool {
             state: State::Initialising,
             device_list: vec![],
             shift_state: Arc::new((Mutex::new(0), Condvar::new())),
-            source_path: "".to_string(),
+            source_list: vec![],
             receiver_list: vec![],
             thread_state: Arc::new((Mutex::new(false), Condvar::new())),
         }
@@ -188,16 +212,21 @@ impl ShiftTool {
 
         let mut new_devices: Vec<VpcDevice> = vec![];
         for device in hidapi.device_list() {
+            let full_name = calculate_full_device_name(device);
+            #[cfg(feature = "logging")] {
+                info!("{}", full_name );
+            }
             let firmware_string = device.manufacturer_string().unwrap_or_else(|| "");
             let device_name = device.product_string().unwrap_or_else(|| "");
             let device_path = device.path().to_str().expect("Invalid UTF-8").to_string();
+            let serial = device.serial_number().unwrap_or_default();
             let mut found = false;
             if !self.device_list.is_empty() {
                 found = self.device_list.iter().any(|r| r.path == device_path.clone());
             }
             if !found {
                 if is_supported(firmware_string.to_owned().into()) {
-                    new_devices.push(VpcDevice { path: device_path.into(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into() });
+                    new_devices.push(VpcDevice { path: device_path.into(), full_name: full_name.to_string(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into(), vendor_id: device.vendor_id(), product_id: device.product_id(), serial_number: serial.to_string(), usage: device.usage() });
                 }
             }
         }
@@ -210,15 +239,16 @@ impl ShiftTool {
             let mut merged_list = self.device_list.clone();
             merged_list.extend(new_devices.into_iter());
 
-            merged_list.sort_by(|a, b| a.path.cmp(&b.path));
-            merged_list.dedup_by(|a, b| a.path.eq(&b.path));
+            // product_id is the only unique value from the device
+            merged_list.sort_by(|a, b| a.product_id.cmp(&b.product_id));
+            merged_list.dedup_by(|a, b| a.product_id.eq(&b.product_id));
 
-            merged_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
+            merged_list.insert(0, VpcDevice::default());
             self.device_list = merged_list.clone();
         }
 
         if self.device_list.is_empty() {
-            self.device_list.insert(0, VpcDevice { path: String::from("").into(), name: String::from("-NO CONNECTION (Select device from the list)-").into(), firmware: String::from("").into() });
+            self.device_list.insert(0, VpcDevice::default());
         }
     }
 
@@ -226,7 +256,7 @@ impl ShiftTool {
         let reference_to_self = self;
         let shared_shift_state = reference_to_self.shift_state.clone();
         let shared_run_state = reference_to_self.thread_state.clone();
-        let source_device = CString::new(&*reference_to_self.source_path.clone()).expect("Failed to create CString");
+        // let source_device = CString::new(&*reference_to_self.source_path.clone()).expect("Failed to create CString");
         let mut hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
 
         // Clear out our device list
@@ -253,33 +283,23 @@ impl ShiftTool {
         }
 
         // Attempt to open the source device
-        let hid_source_device = match hidapi.open_path(source_device.as_ref()) {
-            Ok(device) => device,
-            Err(_) => {
-                #[cfg(feature = "logging")] {
-                    error!("Was unable to open the source device {:?}", source_device);
-                }
-
-                return false;
-            }
-        };
-        hid_source_device.set_blocking_mode(false).expect("unable to set source blocking mode");
+        let mut source_devices = vec![];
+        for i in 0..reference_to_self.source_list.len() {
+            // product_id is the only unique value from the device
+            let hid_device = match hidapi.open_serial(reference_to_self.device_list[reference_to_self.source_list[i]].vendor_id, reference_to_self.device_list[reference_to_self.source_list[i]].product_id, &*reference_to_self.device_list[reference_to_self.source_list[i]].serial_number) {
+                Ok(device) => device,
+                Err(_) => continue,
+            };
+            hid_device.set_blocking_mode(false).expect("unable to set receiver blocking mode");
+            source_devices.push(hid_device);
+        }
 
         // List of device handles for the thread to write to
         let mut receiver_devices = vec![];
         // Loop for all receiver devices and open a handle to them
         for i in 0..reference_to_self.receiver_list.len() {
-            let receiver_path = match CString::new(&*reference_to_self.device_list[reference_to_self.receiver_list[i]].path.clone()) {
-                Ok(str) => str,
-                Err(e) => {
-                    #[cfg(feature = "logging")] {
-                        error!("Error: {}", e);
-                    }
-                    continue;
-                }
-            };
-            println!("{:?}", receiver_path);
-            let hid_device = match hidapi.open_path(&receiver_path) {
+            // product_id is the only unique value from the device
+            let hid_device = match hidapi.open_serial(reference_to_self.device_list[reference_to_self.receiver_list[i]].vendor_id, reference_to_self.device_list[reference_to_self.receiver_list[i]].product_id, &*reference_to_self.device_list[reference_to_self.receiver_list[i]].serial_number) {
                 Ok(device) => device,
                 Err(_) => continue,
             };
@@ -297,6 +317,7 @@ impl ShiftTool {
             // byte[1..2]: u16 = shift mode. each bit rep each mode
             // It might be possible to have multiple modes set at the same time, but I'm not sure
             let mut buf: [u8; 3] = [0; 3];
+            let mut finalbuf: [u8; 3] = [0; 3];
             let &(ref lock, ref _cvar) = &*shared_run_state;
 
             loop {
@@ -317,20 +338,27 @@ impl ShiftTool {
 
                 // Do some work
                 buf[0] = 0x04;
-                match hid_source_device.get_feature_report(&mut buf) {
-                    Ok(bytes_written) => bytes_written,
-                    Err(e) => {
-                        error!("{}", e);
+                for device in &source_devices {
+                    match device.get_feature_report(&mut buf) {
+                        Ok(bytes_written) => bytes_written,
+                        Err(e) => {
+                            error!("{}", e);
 
-                        let mut started = match lock.try_lock() {
-                            Ok(guard) => guard,
-                            Err(_) => continue, // Retry if the lock couldn't be acquired immediately
-                        };
-                        *started = false;
-                        break;
-                    }
-                };
+                            let mut started = match lock.try_lock() {
+                                Ok(guard) => guard,
+                                Err(_) => continue, // Retry if the lock couldn't be acquired immediately
+                            };
+                            *started = false;
+                            break;
+                        }
+                    };
 
+                    //TODO: Copy the data out so we can run through our compare later
+                }
+
+                finalbuf[0] = 0x04;
+                finalbuf[1] |= buf[1];
+                finalbuf[2] |= buf[2];
                 {
                     // notify the main gui of the current shift state.
                     // This is only to show the current state on the GUI.
@@ -340,13 +368,13 @@ impl ShiftTool {
                         Ok(guard) => guard,
                         Err(_) => continue, // Retry if the lock couldn't be acquired immediately
                     };
-                    *shift = merge_u8_into_u16(buf[2], buf[1]);
+                    *shift = merge_u8_into_u16(finalbuf[2], finalbuf[1]);
                 }
 
                 // println!("Sending data...");
                 // This sends the shift data read from the source device directly to the receivers
                 for device in &receiver_devices {
-                    match device.send_feature_report(&mut buf) {
+                    match device.send_feature_report(&mut finalbuf) {
                         Ok(bytes_written) => bytes_written,
                         Err(e) => {
                             eprintln!("{}", e);
@@ -362,6 +390,10 @@ impl ShiftTool {
                         }
                     };
                 }
+
+                // Make sure we clear the buffer
+                finalbuf[1] = 0;
+                finalbuf[2] = 0;
 
                 // Sleep for 200 milliseconds
                 thread::sleep(Duration::from_millis(200));
@@ -385,54 +417,53 @@ impl ShiftTool {
         let hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
         self.refresh_devices(hidapi);
 
+        if self.source_list.len() == 0 {
+            self.source_list.push(0);
+        }
+
+
         ui.columns(
             2,
             |columns| {
-                columns[0].horizontal(|ui| {
-                    let _ = ui.label("Source");
-                    egui::ComboBox::from_id_source("Source")
-                        .selected_text(format!("{} {}", match self.device_list.iter().find(|&device| device.path == self.source_path) {
-                            None => "",
-                            Some(item) => &item.firmware,
-                        }, match self.device_list.iter().find(|&device| device.path == self.source_path) {
-                            None => "",
-                            Some(item) => &item.name,
-                        }))
-                        .show_ui(ui, |ui| {
-                            for i in 0..self.device_list.len() {
-                                let value = ui.selectable_value(&mut &self.device_list[i].path, &self.source_path, format!("{} {}", self.device_list[i].firmware, self.device_list[i].name));
-                                if value.clicked() && !thread_running {
-                                    self.source_path = self.device_list[i].path.clone();
-                                }
-                            }
-                        });
-                });
-
                 // This is to output the data that we got from the source
-                columns[0].horizontal(|ui| {
-                    if self.source_path != "" {
-                        let state;
-                        {
-                            let &(ref lock2, ref _cvar) = &*self.shift_state;
-                            state = *(lock2.lock().unwrap());
-                        }
-                        let _ = ui.label("Shift:");
-                        for i in 0..5 {
-                            let shift = read_bit(state, i);
-                            // println!("{:02x} {}", state, shift);
-                            let _ = ui.selectable_label(shift, format!("{}", i + 1));
-                        }
+                for i in 0..self.source_list.len() {
+                    columns[0].horizontal(|ui| {
+                        let _ = ui.label(format!("Source {}", i+1));
+                        egui::ComboBox::from_id_source(format!("Source {}", i+1))
+                            .selected_text(format!("{}", &self.device_list[self.source_list[i]]))
+                            .show_ui(ui, |ui| {
+                                for j in 0..self.device_list.len() {
+                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.source_list[i]].full_name, format!("{} {}", self.device_list[j].firmware, self.device_list[j].name));
+                                    if value.clicked() && !thread_running {
+                                        self.source_list[i] = j;
+                                    }
+                                }
+                            });
+                    });
+                    columns[0].horizontal(|ui| {
+                        if self.source_list[i] != 0 {
+                            let state;
+                            {
+                                let &(ref lock2, ref _cvar) = &*self.shift_state;
+                                state = *(lock2.lock().unwrap());
+                            }
+                            let _ = ui.label("Shift:");
+                            for j in 0..5 {
+                                let shift = read_bit(state, j);
+                                let _ = ui.selectable_label(shift, format!("{}", j + 1));
+                            }
 
-                        // I'm not sure which of these 3 bits rep which mode
-                        let dtnt = read_bit(state, 6);
-                        let zoom = read_bit(state, 7);
-                        let trim = read_bit(state, 8);
+                            // I'm not sure which of these 3 bits rep which mode
+                            let dtnt = read_bit(state, 6);
+                            let zoom = read_bit(state, 7);
+                            let trim = read_bit(state, 8);
 
-                        let _ = ui.selectable_label(dtnt, "DTNT");
-                        let _ = ui.selectable_label(zoom, "ZOOM");
-                        let _ = ui.selectable_label(trim, "TRIM");
-                    }
-                });
+                            let _ = ui.selectable_label(dtnt, "DTNT");
+                            let _ = ui.selectable_label(zoom, "ZOOM");
+                            let _ = ui.selectable_label(trim, "TRIM");
+                        }
+                    });
+                }
 
                 for i in 0..self.receiver_list.len() {
                     columns[0].horizontal(|ui| {
@@ -440,7 +471,7 @@ impl ShiftTool {
                             .selected_text(format!("{}", &self.device_list[self.receiver_list[i]]))
                             .show_ui(ui, |ui| {
                                 for j in 0..self.device_list.len() {
-                                    let value = ui.selectable_value(&mut &self.device_list[j].path, &self.device_list[self.receiver_list[i]].path, format!("{} {}", self.device_list[j].firmware, self.device_list[j].name));
+                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.receiver_list[i]].full_name, format!("{} {}", self.device_list[j].firmware, self.device_list[j].name));
                                     if value.clicked() && !thread_running {
                                         self.receiver_list[i] = j;
                                     }
@@ -456,7 +487,7 @@ impl ShiftTool {
                 }
                 if columns[1].button(start_stop_button_text).clicked() {
                     // Don't do anything if we didn't select a source and receiver
-                    if self.source_path == "" || self.receiver_list.len() == 0 {
+                    if self.source_list.len() == 0 || self.receiver_list.len() == 0 {
                         return;
                     }
 
