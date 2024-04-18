@@ -28,7 +28,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             bin: shift_tool.exe
             name: shift_tool-Windows-x86_64.zip
-            command: cargo
+            command: build
             dependencies_command: true
 
     runs-on: ${{ matrix.platform.os }}
@@ -45,6 +45,15 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: "--locked --release"
           strip: true
+      - name: Prepare Release
+        working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release
+        shell: bash
+        run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
+      - name: Upload build
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.platform.release_for }}_build
+          path: ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz
 
       # more packaging stuff goes here ...
 #  build:
