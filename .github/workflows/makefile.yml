@@ -21,6 +21,7 @@ jobs:
             bin: shift_tool
             name: shift_tool-Linux-x86_64.tar.gz
             command: build
+            dependencies_command: sudo apt install -y libudev-dev curl
 
           - release_for: Windows-x86_64
             os: windows-latest
@@ -28,14 +29,14 @@ jobs:
             bin: shift_tool.exe
             name: shift_tool-Windows-x86_64.zip
             command: cargo
+            dependencies_command: true
 
     runs-on: ${{ matrix.platform.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-#      - name: Install dependencies
-#        run: |
-#          sudo apt install -y libudev-dev curl
+      - name: Install dependencies
+        run: ${{ matrix.platform.dependencies_command }}
       - name: Build binary
         uses: houseabsolute/actions-rust-cross@v0
         with:
