@@ -86,7 +86,8 @@ fn is_supported(input: String) -> bool {
 
     let fixed_list = vec![
         String::from("VIRPIL Controls 20220720"),
-        String::from("VIRPIL Controls 20230328")
+        String::from("VIRPIL Controls 20230328"),
+        String::from("VIRPIL Controls 20240323"),
     ];
 
     fixed_list.contains(&input)
