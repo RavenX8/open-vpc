@@ -128,7 +128,11 @@ impl Default for VpcDevice {
 
 impl std::fmt::Display for VpcDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{} {}", self.firmware, self.name)
+        if self.vendor_id == 0 && self.product_id == 0 {
+            write!(f, "{}", self.name)
+        } else {
+            write!(f, "VID: {:04x} PID: {:04x} {} ({})", self.vendor_id, self.product_id, self.name, self.firmware)
+        }
     }
 }
 
@@ -199,24 +203,14 @@ impl Default for ShiftTool {
 
 impl ShiftTool {
     fn about_screen(&mut self, ui: &mut Ui) {
-        let loading = self.state != State::About;
+        ui.set_width(INITIAL_WIDTH);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.centered_and_justified(|ui| {
-                    let mut about = "";
-                    if !loading {
-                        about = "About ";
-                    }
-                    ui.heading(format!("{}{}", about, PROGRAM_TITLE, ));
+                    let about = "About ";
+                    ui.heading(format!("{}{}", about, PROGRAM_TITLE));
                 });
             });
-            if loading {
-                ui.horizontal(|ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.add(egui::Label::new("-- Loading, please wait --"));
-                    });
-                });
-            }
             for line in about::about() {
                 ui.horizontal(|ui| {
                     ui.centered_and_justified(|ui| {
@@ -225,19 +219,17 @@ impl ShiftTool {
                 });
             }
 
-            if !loading {
-                ui.horizontal(|ui| {
-                    let blank: String = "         ".to_string();
-                    ui.centered_and_justified(|ui| {
-                        ui.label(&blank);
-                        if ui.button("OK")
-                            .clicked() {
-                            self.state = State::Running;
-                        }
-                        ui.label(&blank);
-                    });
+            ui.horizontal(|ui| {
+                let blank: String = "         ".to_string();
+                ui.centered_and_justified(|ui| {
+                    ui.label(&blank);
+                    if ui.button("OK")
+                        .clicked() {
+                        self.state = State::Running;
+                    }
+                    ui.label(&blank);
                 });
-            }
+            });
         });
     }
 
@@ -515,7 +507,6 @@ impl ShiftTool {
             self.source_state_enabled.push([true; 8]);
         }
 
-
         ui.columns(
             2,
             |columns| {
@@ -524,10 +515,11 @@ impl ShiftTool {
                     columns[0].horizontal(|ui| {
                         let _ = ui.label(format!("Source {}", i+1));
                         egui::ComboBox::from_id_source(format!("Source {}", i+1))
+                            .width(500.0)
                             .selected_text(format!("{}", &self.device_list[self.source_list[i]]))
                             .show_ui(ui, |ui| {
                                 for j in 0..self.device_list.len() {
-                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.source_list[i]].full_name, format!("{} {}", self.device_list[j].firmware, self.device_list[j].name));
+                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.source_list[i]].full_name, format!("{}", self.device_list[j]));
                                     if value.clicked() && !thread_running {
                                         self.source_list[i] = j;
                                     }
@@ -605,7 +597,6 @@ impl ShiftTool {
                         }
                     }
                 });
-
                 columns[0].horizontal(|ui| {
                     let state;
                     {
@@ -629,14 +620,14 @@ impl ShiftTool {
                     let _ = ui.selectable_label(trim, "TRIM");
                 });
                 columns[0].separator();
-
                 for i in 0..self.receiver_list.len() {
                     columns[0].horizontal(|ui| {
                         egui::ComboBox::from_id_source(i)
+                            .width(500.0)
                             .selected_text(format!("{}", &self.device_list[self.receiver_list[i]]))
                             .show_ui(ui, |ui| {
                                 for j in 0..self.device_list.len() {
-                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.receiver_list[i]].full_name, format!("{} {}", self.device_list[j].firmware, self.device_list[j].name));
+                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.receiver_list[i]].full_name, format!("{}", self.device_list[j]));
                                     if value.clicked() && !thread_running {
                                         self.receiver_list[i] = j;
                                     }
@@ -645,96 +636,93 @@ impl ShiftTool {
                     });
                 }
 
-
-                let mut start_stop_button_text = "Start";
-                if thread_running {
-                    start_stop_button_text = "Stop";
-                }
-                if columns[1].button(start_stop_button_text).clicked() {
-                    // Don't do anything if we didn't select a source and receiver
-                    if self.source_list.len() == 0 || self.receiver_list.len() == 0 {
-                        return;
+                columns[1].vertical(|ui| {
+                    let mut start_stop_button_text = "Start";
+                    if thread_running {
+                        start_stop_button_text = "Stop";
                     }
-
-                    #[cfg(feature = "logging")] {
-                        trace!("Toggling run thread...");
-                    }
-                    let is_started;
-                    {
-                        let &(ref lock, ref cvar) = &*self.thread_state;
-                        let mut started = lock.lock().unwrap();
-                        is_started = *started;
-                        *started = !*started;
-                        cvar.notify_all();
-                    }
-
-                    if !is_started {
-                        if !self.spawn_worker() {
-                            {
-                                let &(ref lock, ref cvar) = &*self.thread_state;
-                                let mut started = lock.lock().unwrap();
-                                *started = false;
-                                cvar.notify_all();
-                            }
+                    if ui.button(start_stop_button_text)
+                        .clicked() {
+                        // Don't do anything if we didn't select a source and receiver
+                        if self.source_list.len() == 0 || self.receiver_list.len() == 0 {
+                            return;
                         }
-                    } else {
-                        for source_state in self.source_states.clone() {
+
+                        #[cfg(feature = "logging")] {
+                            trace!("Toggling run thread...");
+                        }
+                        let is_started;
+                        {
+                            let &(ref lock, ref cvar) = &*self.thread_state;
+                            let mut started = lock.lock().unwrap();
+                            is_started = *started;
+                            *started = !*started;
+                            cvar.notify_all();
+                        }
+
+                        if !is_started {
+                            if !self.spawn_worker() {
+                                {
+                                    let &(ref lock, ref cvar) = &*self.thread_state;
+                                    let mut started = lock.lock().unwrap();
+                                    *started = false;
+                                    cvar.notify_all();
+                                }
+                            }
+                        } else {
+                            for source_state in self.source_states.clone() {
+                                {
+                                    // reset each source state
+                                    let &(ref lock, ref cvar) = &*source_state;
+                                    let mut state = lock.lock().unwrap();
+                                    *state = 0;
+                                    cvar.notify_all();
+                                }
+                            }
                             {
-                                // reset each source state
-                                let &(ref lock, ref cvar) = &*source_state;
+                                // reset result state
+                                let &(ref lock, ref cvar) = &*self.shift_state;
                                 let mut state = lock.lock().unwrap();
                                 *state = 0;
                                 cvar.notify_all();
                             }
+                            for i in 0..self.device_list.len() {
+                                self.device_list[i].active = false;
+                            }
                         }
-                        {
-                            // reset result state
-                            let &(ref lock, ref cvar) = &*self.shift_state;
-                            let mut state = lock.lock().unwrap();
-                            *state = 0;
-                            cvar.notify_all();
-                        }
-                        for i in 0..self.device_list.len() {
-                            self.device_list[i].active = false;
+                        #[cfg(feature = "logging")] {
+                            trace!("Done");
                         }
                     }
-                    #[cfg(feature = "logging")] {
-                        trace!("Done");
-                    }
-                }
 
-                if columns[1].button("Add Source").clicked() {
-                    if !thread_running {
+                    if ui.add_enabled(!thread_running, egui::Button::new("Add Source")).clicked() {
                         self.source_list.push(0);
                         self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
                         self.source_state_enabled.push([true; 8]);
                     }
-                }
-                if self.source_list.len() > 1 && columns[1].button("Remove Source").clicked() {
-                    if !thread_running {
+                    if self.source_list.len() > 1 && ui.add_enabled(!thread_running, egui::Button::new("Remove Source")).clicked() {
+
                         self.source_list.pop();
                         self.source_states.pop();
                         self.source_state_enabled.pop();
-                    }
-                }
 
-                if columns[1].button("Add Receiver").clicked() {
-                    if !thread_running {
+                    }
+
+                    if ui.add_enabled(!thread_running, egui::Button::new("Add Receiver")).clicked() {
                         self.receiver_list.push(0);
                     }
-                }
-                if self.receiver_list.len() > 0 && columns[1].button("Remove Receiver").clicked() {
-                    if !thread_running {
+
+                    if self.receiver_list.len() > 0 && ui.add_enabled(!thread_running, egui::Button::new("Remove Receiver")).clicked() {
                         self.receiver_list.pop();
                     }
-                }
-                // if columns[1].button("Save").clicked() {}
-                if columns[1].button("About").clicked() {
-                    self.state = State::About;
-                }
-                if columns[1].button("Exit").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                    // if columns[1].button("Save").clicked() {}
+                    if ui.button("About").clicked() {
+                        self.state = State::About;
+                    }
+                    if ui.button("Exit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
             }
         );
     }
