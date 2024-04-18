@@ -45,11 +45,11 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: "--locked --release"
           strip: true
-      - name: Prepare Release
-        working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release
-        run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='*.pdb' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
+#      - name: Prepare Release
+#        working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release
+#        run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='*.pdb' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform.release_for }}_build
-          path: ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz
+          path: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release/${{ matrix.platform.bin }}
