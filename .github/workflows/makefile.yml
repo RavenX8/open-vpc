@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  linux-build:
     runs-on: ubuntu-latest
     env:
       target: release
