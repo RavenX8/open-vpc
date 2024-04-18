@@ -3,7 +3,7 @@
 // hide console window on Windows in release
 extern crate hidapi;
 
-use std::ops::Index;
+use std::ops::{Index, IndexMut};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use eframe::{egui, glow};
-use eframe::egui::{Context, Ui};
+use eframe::egui::{Color32, Context, Ui};
 use hidapi::{DeviceInfo, HidApi};
 #[cfg(feature = "logging")]
 use log::{debug, error, info, trace};
@@ -21,6 +21,8 @@ mod about;
 const PROGRAM_TITLE: &str = "OpenVPC - Shift Tool";
 const INITIAL_WIDTH: f32 = 720.0;
 const INITIAL_HEIGHT: f32 = 260.0;
+
+const DISABLED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
 
 #[derive(Copy, Clone, PartialEq)]
 enum State {
@@ -137,6 +139,17 @@ enum ShiftModifiers {
     XOR = 2,
 }
 
+impl std::fmt::Display for ShiftModifiers {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let text = match self {
+            ShiftModifiers::OR => "OR",
+            ShiftModifiers::AND => "AND",
+            ShiftModifiers::XOR => "XOR",
+        };
+        write!(f, "{}", text)
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 struct ModifiersArray {
     data: [ShiftModifiers; 8],
@@ -150,6 +163,12 @@ impl Index<usize> for ModifiersArray {
     }
 }
 
+impl IndexMut<usize> for ModifiersArray {
+    fn index_mut(&mut self, index: usize) -> &mut ShiftModifiers {
+        &mut self.data[index]
+    }
+}
+
 struct ShiftTool {
     state: State,
     device_list: Vec<VpcDevice>,
@@ -159,6 +178,7 @@ struct ShiftTool {
     shift_state: Arc<(Mutex<u16>, Condvar)>,
     thread_state: Arc<(Mutex<bool>, Condvar)>,
     shift_modifiers: ModifiersArray,
+    source_state_enabled: Vec<[bool; 8]>,
 }
 
 impl Default for ShiftTool {
@@ -172,6 +192,7 @@ impl Default for ShiftTool {
             shift_state: Arc::new((Mutex::new(0), Condvar::new())),
             thread_state: Arc::new((Mutex::new(false), Condvar::new())),
             shift_modifiers: ModifiersArray{data: [ShiftModifiers::OR; 8]},
+            source_state_enabled: vec![]
         }
     }
 }
@@ -291,6 +312,7 @@ impl ShiftTool {
         let reference_to_self = self;
         let shared_shift_state = reference_to_self.source_states.clone();
         let shared_shift_modifiers = reference_to_self.shift_modifiers.clone();
+        let shared_source_state_enabled = reference_to_self.source_state_enabled.clone();
         let shared_final_shift_state = reference_to_self.shift_state.clone();
         let shared_run_state = reference_to_self.thread_state.clone();
         let mut hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
@@ -414,8 +436,10 @@ impl ShiftTool {
 
                 for i in 0..8 {
                     let mut values: Vec<bool> = vec![];
-                    for state in &shift_states {
-                        values.push(read_bit(*state, i));
+                    for j in 0..shift_states.len() {
+                        if (&shared_source_state_enabled[j])[<u8 as Into<usize>>::into(i)] == true {
+                            values.push(read_bit(shift_states[j], i));
+                        }
                     }
 
                     let modifier = shared_shift_modifiers[i.into()];
@@ -488,6 +512,7 @@ impl ShiftTool {
         if self.source_list.len() == 0 {
             self.source_list.push(0);
             self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
+            self.source_state_enabled.push([true; 8]);
         }
 
 
@@ -517,9 +542,17 @@ impl ShiftTool {
                         }
 
                         let _ = ui.label("Shift:   ");
+                        let mut color;
                         for j in 0..5 {
                             let shift = read_bit(state, j);
-                            let _ = ui.selectable_label(shift, format!("{}", j + 1));
+
+                            color = egui::Color32::default();
+                            if self.source_state_enabled[i][<u8 as Into<usize>>::into(j)] == false {
+                                color = DISABLED_COLOR;
+                            }
+                            if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
+                                self.source_state_enabled[i][<u8 as Into<usize>>::into(j)] = !self.source_state_enabled[i][<u8 as Into<usize>>::into(j)];
+                            };
                         }
 
                         // I'm not sure which of these 3 bits rep which mode
@@ -527,9 +560,29 @@ impl ShiftTool {
                         let zoom = read_bit(state, 6);
                         let trim = read_bit(state, 7);
 
-                        let _ = ui.selectable_label(dtnt, "DTNT");
-                        let _ = ui.selectable_label(zoom, "ZOOM");
-                        let _ = ui.selectable_label(trim, "TRIM");
+                        color = egui::Color32::default();
+                        if self.source_state_enabled[i][5] == false {
+                            color = DISABLED_COLOR;
+                        }
+                        if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
+                            self.source_state_enabled[i][5] = !self.source_state_enabled[i][5];
+                        }
+
+                        color = egui::Color32::default();
+                        if self.source_state_enabled[i][6] == false {
+                            color = DISABLED_COLOR;
+                        }
+                        if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
+                            self.source_state_enabled[i][6] = !self.source_state_enabled[i][6];
+                        }
+
+                        color = egui::Color32::default();
+                        if self.source_state_enabled[i][7] == false {
+                            color = DISABLED_COLOR;
+                        }
+                        if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
+                            self.source_state_enabled[i][7] = !self.source_state_enabled[i][7];
+                        }
                         let active = self.device_list[self.source_list[i]].active;
                         let mut active_text = "OFFLINE";
                         if active == true {
@@ -537,8 +590,22 @@ impl ShiftTool {
                         }
                         let _ = ui.selectable_label(active, active_text);
                     });
+                    columns[0].separator();
                 }
-                columns[0].separator();
+                columns[0].horizontal(|ui| {
+                    let _ = ui.label("Rules:");
+                    for j in 0..8 {
+                        let rule = self.shift_modifiers[j];
+                        if ui.selectable_label(false, format!("{}", rule)).clicked() && !thread_running {
+                            self.shift_modifiers[j] = match self.shift_modifiers[j] {
+                                ShiftModifiers::OR => ShiftModifiers::AND,
+                                ShiftModifiers::AND => ShiftModifiers::XOR,
+                                ShiftModifiers::XOR => ShiftModifiers::OR,
+                            }
+                        }
+                    }
+                });
+
                 columns[0].horizontal(|ui| {
                     let state;
                     {
@@ -610,6 +677,26 @@ impl ShiftTool {
                                 cvar.notify_all();
                             }
                         }
+                    } else {
+                        for source_state in self.source_states.clone() {
+                            {
+                                // reset each source state
+                                let &(ref lock, ref cvar) = &*source_state;
+                                let mut state = lock.lock().unwrap();
+                                *state = 0;
+                                cvar.notify_all();
+                            }
+                        }
+                        {
+                            // reset result state
+                            let &(ref lock, ref cvar) = &*self.shift_state;
+                            let mut state = lock.lock().unwrap();
+                            *state = 0;
+                            cvar.notify_all();
+                        }
+                        for i in 0..self.device_list.len() {
+                            self.device_list[i].active = false;
+                        }
                     }
                     #[cfg(feature = "logging")] {
                         trace!("Done");
@@ -620,12 +707,14 @@ impl ShiftTool {
                     if !thread_running {
                         self.source_list.push(0);
                         self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
+                        self.source_state_enabled.push([true; 8]);
                     }
                 }
                 if self.source_list.len() > 1 && columns[1].button("Remove Source").clicked() {
                     if !thread_running {
                         self.source_list.pop();
                         self.source_states.pop();
+                        self.source_state_enabled.pop();
                     }
                 }
 
