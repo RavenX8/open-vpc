@@ -47,7 +47,7 @@ jobs:
           strip: true
       - name: Prepare Release
         working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release
-        run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
+        run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='*.pdb' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
       - name: Upload build
         uses: actions/upload-artifact@v2
         with:
