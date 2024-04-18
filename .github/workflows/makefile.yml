@@ -34,7 +34,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Install dependencies
         run: ${{ matrix.platform.dependencies_command }}
       - name: Build binary
@@ -49,44 +49,7 @@ jobs:
         working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release
         run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='*.pdb' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
       - name: Upload build
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform.release_for }}_build
           path: ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz
-
-      # more packaging stuff goes here ...
-#  build:
-#    runs-on: ubuntu-latest
-#    env:
-#      target: release
-#    steps:
-#    - uses: actions/checkout@v3
-#
-#    - name: Update apt
-#      run: sudo apt update
-#
-#    - name: Get processor arch
-#      run: echo "PROCESSOR_ARCH=`uname -p`" >> $GITHUB_ENV
-#
-#    - name: Install dependencies
-#      run: |
-#        sudo apt install -y libudev-dev curl
-#        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
-#        . "$HOME/.cargo/env"
-#        cargo --version
-#
-#    - name: Build
-#      run: |
-#        . "$HOME/.cargo/env"
-#        make all
-#
-#    - name: Prepare Release
-#      working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ env.target }}
-#      shell: bash
-#      run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ runner.os }}-${{ env.PROCESSOR_ARCH }}-shift_tool.tar.gz *
-#
-#    - name: Upload linux build
-#      uses: actions/upload-artifact@v2
-#      with:
-#        name: linux_${{ env.target }}_build
-#        path: ${{github.workspace}}/${{ runner.os }}-${{ env.PROCESSOR_ARCH }}-shift_tool.tar.gz
