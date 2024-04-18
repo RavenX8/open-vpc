@@ -637,11 +637,13 @@ impl ShiftTool {
                 }
 
                 columns[1].vertical(|ui| {
+                    let mut color = egui::Color32::default();
                     let mut start_stop_button_text = "Start";
                     if thread_running {
                         start_stop_button_text = "Stop";
+                        color = DISABLED_COLOR;
                     }
-                    if ui.button(start_stop_button_text)
+                    if ui.button(egui::RichText::new(start_stop_button_text).background_color(color))
                         .clicked() {
                         // Don't do anything if we didn't select a source and receiver
                         if self.source_list.len() == 0 || self.receiver_list.len() == 0 {
