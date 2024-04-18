@@ -45,18 +45,3 @@ jobs:
       with:
         name: linux_${{ env.target }}_build
         path: ${{github.workspace}}/${{ runner.os }}-${{ env.PROCESSOR_ARCH }}-shift_tool.tar.gz
-        
-  windows-build:
-    runs-on: windows-latest
-    env:
-      target: release
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Build
-      uses: rust-build/rust-build.action@v1.4.5
-      with:
-        RUSTTARGET: shift_tool
-        SRC_DIR: ${{github.workspace}}/tools/shift_tool
-
-    
