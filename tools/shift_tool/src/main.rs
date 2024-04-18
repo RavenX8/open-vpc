@@ -3,6 +3,7 @@
 // hide console window on Windows in release
 extern crate hidapi;
 
+use std::ops::Index;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -61,6 +62,14 @@ fn read_bit(value: u16, position: u8) -> bool {
     (value & (1 << position)) != 0
 }
 
+fn set_bit(value: u8, bit_position: u8, bit_value: bool) -> u8 {
+    if bit_value {
+        value | (1 << bit_position) // Set the bit to 1
+    } else {
+        value & !(1 << bit_position) // Set the bit to 0
+    }
+}
+
 fn merge_u8_into_u16(high: u8, low: u8) -> u16 {
     // Shift `high` to the left by 8 bits and combine it with `low`
     let merged = (high as u16) << 8 | (low as u16);
@@ -74,6 +83,7 @@ fn is_supported(input: String) -> bool {
     }
 
     let fixed_list = vec![
+        String::from("VIRPIL Controls 20220720"),
         String::from("VIRPIL Controls 20230328")
     ];
 
@@ -85,7 +95,6 @@ fn calculate_full_device_name(device_info: &DeviceInfo) -> String {
     full_name
 }
 
-
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Hash, Clone)]
 struct VpcDevice {
     path: String,
@@ -96,6 +105,7 @@ struct VpcDevice {
     product_id: u16,
     serial_number: String,
     usage: u16,
+    active: bool,
 }
 
 impl Default for VpcDevice {
@@ -109,6 +119,7 @@ impl Default for VpcDevice {
             product_id: 0,
             serial_number: String::from(""),
             usage: 0,
+            active: false,
         }
     }
 }
@@ -119,13 +130,35 @@ impl std::fmt::Display for VpcDevice {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+enum ShiftModifiers {
+    OR = 0,
+    AND = 1,
+    XOR = 2,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct ModifiersArray {
+    data: [ShiftModifiers; 8],
+}
+
+impl Index<usize> for ModifiersArray {
+    type Output = ShiftModifiers;
+
+    fn index(&self, index: usize) -> &ShiftModifiers {
+        &self.data[index]
+    }
+}
+
 struct ShiftTool {
     state: State,
     device_list: Vec<VpcDevice>,
-    shift_state: Arc<(Mutex<u16>, Condvar)>,
     source_list: Vec<usize>,
     receiver_list: Vec<usize>,
+    source_states: Vec<Arc<(Mutex<u16>, Condvar)>>,
+    shift_state: Arc<(Mutex<u16>, Condvar)>,
     thread_state: Arc<(Mutex<bool>, Condvar)>,
+    shift_modifiers: ModifiersArray,
 }
 
 impl Default for ShiftTool {
@@ -133,10 +166,12 @@ impl Default for ShiftTool {
         Self {
             state: State::Initialising,
             device_list: vec![],
-            shift_state: Arc::new((Mutex::new(0), Condvar::new())),
             source_list: vec![],
             receiver_list: vec![],
+            source_states: vec![],
+            shift_state: Arc::new((Mutex::new(0), Condvar::new())),
             thread_state: Arc::new((Mutex::new(false), Condvar::new())),
+            shift_modifiers: ModifiersArray{data: [ShiftModifiers::OR; 8]},
         }
     }
 }
@@ -226,7 +261,7 @@ impl ShiftTool {
             }
             if !found {
                 if is_supported(firmware_string.to_owned().into()) {
-                    new_devices.push(VpcDevice { path: device_path.into(), full_name: full_name.to_string(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into(), vendor_id: device.vendor_id(), product_id: device.product_id(), serial_number: serial.to_string(), usage: device.usage() });
+                    new_devices.push(VpcDevice { path: device_path.into(), full_name: full_name.to_string(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into(), vendor_id: device.vendor_id(), product_id: device.product_id(), serial_number: serial.to_string(), usage: device.usage(), active: false });
                 }
             }
         }
@@ -254,9 +289,10 @@ impl ShiftTool {
 
     fn spawn_worker(&mut self) -> bool {
         let reference_to_self = self;
-        let shared_shift_state = reference_to_self.shift_state.clone();
+        let shared_shift_state = reference_to_self.source_states.clone();
+        let shared_shift_modifiers = reference_to_self.shift_modifiers.clone();
+        let shared_final_shift_state = reference_to_self.shift_state.clone();
         let shared_run_state = reference_to_self.thread_state.clone();
-        // let source_device = CString::new(&*reference_to_self.source_path.clone()).expect("Failed to create CString");
         let mut hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
 
         // Clear out our device list
@@ -288,8 +324,12 @@ impl ShiftTool {
             // product_id is the only unique value from the device
             let hid_device = match hidapi.open_serial(reference_to_self.device_list[reference_to_self.source_list[i]].vendor_id, reference_to_self.device_list[reference_to_self.source_list[i]].product_id, &*reference_to_self.device_list[reference_to_self.source_list[i]].serial_number) {
                 Ok(device) => device,
-                Err(_) => continue,
+                Err(_) => {
+                    reference_to_self.device_list[reference_to_self.source_list[i]].active = false;
+                    continue
+                },
             };
+            reference_to_self.device_list[reference_to_self.source_list[i]].active = true;
             hid_device.set_blocking_mode(false).expect("unable to set receiver blocking mode");
             source_devices.push(hid_device);
         }
@@ -321,6 +361,8 @@ impl ShiftTool {
             let &(ref lock, ref _cvar) = &*shared_run_state;
 
             loop {
+                let mut shift_states: Vec<u16> = vec![];
+                shift_states.resize(source_devices.len(), 0);
                 // Make sure we grab the lock in this small context here
                 {
                     // Attempt to acquire the lock
@@ -338,6 +380,8 @@ impl ShiftTool {
 
                 // Do some work
                 buf[0] = 0x04;
+                finalbuf[0] = 0x04;
+                let mut index = 0;
                 for device in &source_devices {
                     match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
@@ -353,16 +397,40 @@ impl ShiftTool {
                         }
                     };
 
-                    //TODO: Copy the data out so we can run through our compare later
+                    {
+                        // notify the main gui of the current shift state.
+                        // This is only to show the current state on the GUI.
+                        let &(ref lock2, ref _cvar2) = &*shared_shift_state[index];
+                        // Attempt to acquire the lock
+                        let mut shift = match lock2.try_lock() {
+                            Ok(guard) => guard,
+                            Err(_) => continue, // Retry if the lock couldn't be acquired immediately
+                        };
+                        shift_states[index] = merge_u8_into_u16(buf[2], buf[1]);
+                        *shift = shift_states[index];
+                    }
+                    index = index + 1;
                 }
 
-                finalbuf[0] = 0x04;
-                finalbuf[1] |= buf[1];
-                finalbuf[2] |= buf[2];
+                for i in 0..8 {
+                    let mut values: Vec<bool> = vec![];
+                    for state in &shift_states {
+                        values.push(read_bit(*state, i));
+                    }
+
+                    let modifier = shared_shift_modifiers[i.into()];
+                    let final_value = match modifier {
+                        ShiftModifiers::OR => values.iter().fold(false, |acc, &x| acc | x),
+                        ShiftModifiers::AND => values.iter().fold(true, |acc, &x| acc & x),
+                        ShiftModifiers::XOR => values.iter().fold(false, |acc, &x| acc ^ x),
+                    };
+                    finalbuf[1] = set_bit(finalbuf[1], i, final_value);
+                }
+
                 {
                     // notify the main gui of the current shift state.
                     // This is only to show the current state on the GUI.
-                    let &(ref lock2, ref _cvar2) = &*shared_shift_state;
+                    let &(ref lock2, ref _cvar2) = &*shared_final_shift_state;
                     // Attempt to acquire the lock
                     let mut shift = match lock2.try_lock() {
                         Ok(guard) => guard,
@@ -419,6 +487,7 @@ impl ShiftTool {
 
         if self.source_list.len() == 0 {
             self.source_list.push(0);
+            self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
         }
 
 
@@ -441,29 +510,58 @@ impl ShiftTool {
                             });
                     });
                     columns[0].horizontal(|ui| {
-                        if self.source_list[i] != 0 {
-                            let state;
-                            {
-                                let &(ref lock2, ref _cvar) = &*self.shift_state;
-                                state = *(lock2.lock().unwrap());
-                            }
-                            let _ = ui.label("Shift:");
-                            for j in 0..5 {
-                                let shift = read_bit(state, j);
-                                let _ = ui.selectable_label(shift, format!("{}", j + 1));
-                            }
-
-                            // I'm not sure which of these 3 bits rep which mode
-                            let dtnt = read_bit(state, 6);
-                            let zoom = read_bit(state, 7);
-                            let trim = read_bit(state, 8);
-
-                            let _ = ui.selectable_label(dtnt, "DTNT");
-                            let _ = ui.selectable_label(zoom, "ZOOM");
-                            let _ = ui.selectable_label(trim, "TRIM");
+                        let state;
+                        {
+                            let &(ref lock2, ref _cvar) = &*self.source_states[i];
+                            state = *(lock2.lock().unwrap());
                         }
+
+                        let _ = ui.label("Shift:   ");
+                        for j in 0..5 {
+                            let shift = read_bit(state, j);
+                            let _ = ui.selectable_label(shift, format!("{}", j + 1));
+                        }
+
+                        // I'm not sure which of these 3 bits rep which mode
+                        let dtnt = read_bit(state, 5);
+                        let zoom = read_bit(state, 6);
+                        let trim = read_bit(state, 7);
+
+                        let _ = ui.selectable_label(dtnt, "DTNT");
+                        let _ = ui.selectable_label(zoom, "ZOOM");
+                        let _ = ui.selectable_label(trim, "TRIM");
+                        let active = self.device_list[self.source_list[i]].active;
+                        let mut active_text = "OFFLINE";
+                        if active == true {
+                            active_text = "ONLINE";
+                        }
+                        let _ = ui.selectable_label(active, active_text);
                     });
                 }
+                columns[0].separator();
+                columns[0].horizontal(|ui| {
+                    let state;
+                    {
+                        let &(ref lock2, ref _cvar) = &*self.shift_state;
+                        state = *(lock2.lock().unwrap());
+                    }
+
+                    let _ = ui.label("Result:");
+                    for j in 0..5 {
+                        let shift = read_bit(state, j);
+                        let _ = ui.selectable_label(shift, format!("{}", j + 1));
+                    }
+
+                    // I'm not sure which of these 3 bits rep which mode
+                    let dtnt = read_bit(state, 5);
+                    let zoom = read_bit(state, 6);
+                    let trim = read_bit(state, 7);
+
+                    let _ = ui.selectable_label(dtnt, "DTNT");
+                    let _ = ui.selectable_label(zoom, "ZOOM");
+                    let _ = ui.selectable_label(trim, "TRIM");
+                });
+                columns[0].separator();
 
                 for i in 0..self.receiver_list.len() {
                     columns[0].horizontal(|ui| {
@@ -518,12 +616,25 @@ impl ShiftTool {
                     }
                 }
 
+                if columns[1].button("Add Source").clicked() {
+                    if !thread_running {
+                        self.source_list.push(0);
+                        self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
+                    }
+                }
+                if self.source_list.len() > 1 && columns[1].button("Remove Source").clicked() {
+                    if !thread_running {
+                        self.source_list.pop();
+                        self.source_states.pop();
+                    }
+                }
+
                 if columns[1].button("Add Receiver").clicked() {
                     if !thread_running {
                         self.receiver_list.push(0);
                     }
                 }
-                if columns[1].button("Remove Receiver").clicked() {
+                if self.receiver_list.len() > 0 && columns[1].button("Remove Receiver").clicked() {
                     if !thread_running {
                         self.receiver_list.pop();
                     }
