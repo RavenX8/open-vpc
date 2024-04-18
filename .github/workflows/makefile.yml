@@ -53,9 +53,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    - name: Update apt
-      run: sudo apt update
-
     - name: Build
       uses: rust-build/rust-build.action@v1.4.5
       with:
