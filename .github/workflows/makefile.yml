@@ -16,7 +16,7 @@ jobs:
       matrix:
         platform:
           - release_for: Linux-x86_64
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: shift_tool
             name: shift_tool-Linux-x86_64.tar.gz
@@ -47,7 +47,6 @@ jobs:
           strip: true
       - name: Prepare Release
         working-directory: ${{github.workspace}}/tools/shift_tool/target/${{ matrix.platform.target }}/release
-        shell: bash
         run: tar --exclude='.fingerprint' --exclude='build' --exclude='deps' --exclude='examples' --exclude='incremental' --exclude='*.d' --exclude='.cargo-lock' -zcvf ${{github.workspace}}/${{ matrix.platform.release_for }}-shift_tool.tar.gz *
       - name: Upload build
         uses: actions/upload-artifact@v2
