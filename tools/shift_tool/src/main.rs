@@ -12,9 +12,11 @@ use std::time::Duration;
 use clap::Parser;
 use eframe::{egui, glow};
 use eframe::egui::{Color32, Context, Ui};
+use fast_config::Config;
 use hidapi::{DeviceInfo, HidApi};
 #[cfg(feature = "logging")]
 use log::{debug, error, info, trace};
+use serde::{Deserialize, Serialize};
 
 mod about;
 
@@ -98,9 +100,64 @@ fn calculate_full_device_name(device_info: &DeviceInfo) -> String {
     full_name
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedDevice {
+    vendor_id: u16,
+    product_id: u16,
+    serial_number: String,
+    source_state_enabled: [bool; 8],
+}
+
+impl Default for SavedDevice {
+    fn default() -> Self {
+        Self {
+            vendor_id: 0,
+            product_id: 0,
+            serial_number: String::from(""),
+            source_state_enabled: [true; 8],
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+enum ShiftModifiers {
+    OR = 0,
+    AND = 1,
+    XOR = 2,
+}
+
+impl std::fmt::Display for ShiftModifiers {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let text = match self {
+            ShiftModifiers::OR => "OR",
+            ShiftModifiers::AND => "AND",
+            ShiftModifiers::XOR => "XOR",
+        };
+        write!(f, "{}", text)
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+struct ModifiersArray {
+    data: [ShiftModifiers; 8],
+}
+
+impl Index<usize> for ModifiersArray {
+    type Output = ShiftModifiers;
+
+    fn index(&self, index: usize) -> &ShiftModifiers {
+        &self.data[index]
+    }
+}
+
+impl IndexMut<usize> for ModifiersArray {
+    fn index_mut(&mut self, index: usize) -> &mut ShiftModifiers {
+        &mut self.data[index]
+    }
+}
+
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Hash, Clone)]
 struct VpcDevice {
-    path: String,
     full_name: String,
     name: Rc<String>,
     firmware: Rc<String>,
@@ -114,7 +171,6 @@ struct VpcDevice {
 impl Default for VpcDevice {
     fn default() -> Self {
         Self {
-            path: String::from("").into(),
             full_name: String::from("").into(),
             name: String::from("-NO CONNECTION (Select device from the list)-").into(),
             firmware: String::from("").into(),
@@ -137,53 +193,30 @@ impl std::fmt::Display for VpcDevice {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-enum ShiftModifiers {
-    OR = 0,
-    AND = 1,
-    XOR = 2,
+#[derive(Serialize, Deserialize)]
+struct ConfigData {
+    sources: Vec<SavedDevice>,
+    receivers: Vec<SavedDevice>,
+    shift_modifiers: ModifiersArray,
 }
 
-impl std::fmt::Display for ShiftModifiers {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let text = match self {
-            ShiftModifiers::OR => "OR",
-            ShiftModifiers::AND => "AND",
-            ShiftModifiers::XOR => "XOR",
-        };
-        write!(f, "{}", text)
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct ModifiersArray {
-    data: [ShiftModifiers; 8],
-}
-
-impl Index<usize> for ModifiersArray {
-    type Output = ShiftModifiers;
-
-    fn index(&self, index: usize) -> &ShiftModifiers {
-        &self.data[index]
-    }
-}
-
-impl IndexMut<usize> for ModifiersArray {
-    fn index_mut(&mut self, index: usize) -> &mut ShiftModifiers {
-        &mut self.data[index]
+impl Default for ConfigData {
+    fn default() -> Self {
+        Self {
+            sources: vec![],
+            receivers: vec![],
+            shift_modifiers: ModifiersArray { data: [ShiftModifiers::OR; 8] },
+        }
     }
 }
 
 struct ShiftTool {
     state: State,
     device_list: Vec<VpcDevice>,
-    source_list: Vec<usize>,
-    receiver_list: Vec<usize>,
     source_states: Vec<Arc<(Mutex<u16>, Condvar)>>,
     shift_state: Arc<(Mutex<u16>, Condvar)>,
     thread_state: Arc<(Mutex<bool>, Condvar)>,
-    shift_modifiers: ModifiersArray,
-    source_state_enabled: Vec<[bool; 8]>,
+    config: Config<ConfigData>,
 }
 
 impl Default for ShiftTool {
@@ -191,13 +224,10 @@ impl Default for ShiftTool {
         Self {
             state: State::Initialising,
             device_list: vec![],
-            source_list: vec![],
-            receiver_list: vec![],
             source_states: vec![],
             shift_state: Arc::new((Mutex::new(0), Condvar::new())),
             thread_state: Arc::new((Mutex::new(false), Condvar::new())),
-            shift_modifiers: ModifiersArray{data: [ShiftModifiers::OR; 8]},
-            source_state_enabled: vec![]
+            config: Config::new(format!("{}/shift_tool.json", dirs::config_dir().unwrap_or_default().to_str().unwrap_or_default()), ConfigData::default()).unwrap(),
         }
     }
 }
@@ -238,7 +268,33 @@ impl ShiftTool {
         // Do some init stuff here
         let hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
         self.refresh_devices(hidapi);
+
+        // Load config here and insert the prev sources/receivers
+        for _i in 0..self.config.data.sources.len() {
+            self.add_source();
+        }
+
+        for _i in 0..self.config.data.receivers.len() {
+            self.add_receiver();
+        }
+
         self.state = State::Running;
+    }
+
+    fn find_receiver_device_index(&mut self, i: usize) -> usize {
+        let device_idx = self.device_list.iter().position(|r| r.vendor_id == self.config.data.receivers[i].vendor_id
+            && r.product_id == self.config.data.receivers[i].product_id
+            && r.serial_number == self.config.data.receivers[i].serial_number
+        ).unwrap_or_default();
+        device_idx
+    }
+
+    fn find_source_device_index(&mut self, i: usize) -> usize {
+        let device_idx = self.device_list.iter().position(|r| r.vendor_id == self.config.data.sources[i].vendor_id
+            && r.product_id == self.config.data.sources[i].product_id
+            && r.serial_number == self.config.data.sources[i].serial_number
+        ).unwrap_or_default();
+        device_idx
     }
 
     fn refresh_devices(&mut self, mut hidapi: HidApi) {
@@ -267,15 +323,26 @@ impl ShiftTool {
             }
             let firmware_string = device.manufacturer_string().unwrap_or_else(|| "");
             let device_name = device.product_string().unwrap_or_else(|| "");
-            let device_path = device.path().to_str().expect("Invalid UTF-8").to_string();
             let serial = device.serial_number().unwrap_or_default();
             let mut found = false;
             if !self.device_list.is_empty() {
-                found = self.device_list.iter().any(|r| r.path == device_path.clone());
+                found = self.device_list.iter().any(|r| r.vendor_id == device.vendor_id()
+                    && r.product_id == device.product_id()
+                    && r.serial_number == serial.to_string()
+                );
             }
             if !found {
                 if is_supported(firmware_string.to_owned().into()) {
-                    new_devices.push(VpcDevice { path: device_path.into(), full_name: full_name.to_string(), name: device_name.to_owned().into(), firmware: firmware_string.to_owned().into(), vendor_id: device.vendor_id(), product_id: device.product_id(), serial_number: serial.to_string(), usage: device.usage(), active: false });
+                    new_devices.push(VpcDevice {
+                        full_name: full_name.to_string(),
+                        name: device_name.to_owned().into(),
+                        firmware: firmware_string.to_owned().into(),
+                        vendor_id: device.vendor_id(),
+                        product_id: device.product_id(),
+                        serial_number: serial.to_string(),
+                        usage: device.usage(),
+                        active: false,
+                    });
                 }
             }
         }
@@ -304,8 +371,8 @@ impl ShiftTool {
     fn spawn_worker(&mut self) -> bool {
         let reference_to_self = self;
         let shared_shift_state = reference_to_self.source_states.clone();
-        let shared_shift_modifiers = reference_to_self.shift_modifiers.clone();
-        let shared_source_state_enabled = reference_to_self.source_state_enabled.clone();
+        let shared_shift_modifiers = reference_to_self.config.data.shift_modifiers.clone();
+        let shared_sources = reference_to_self.config.data.sources.clone();
         let shared_final_shift_state = reference_to_self.shift_state.clone();
         let shared_run_state = reference_to_self.thread_state.clone();
         let mut hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
@@ -335,16 +402,17 @@ impl ShiftTool {
 
         // Attempt to open the source device
         let mut source_devices = vec![];
-        for i in 0..reference_to_self.source_list.len() {
+        for i in 0..shared_sources.len() {
+            let source_device = reference_to_self.find_source_device_index(i);
             // product_id is the only unique value from the device
-            let hid_device = match hidapi.open_serial(reference_to_self.device_list[reference_to_self.source_list[i]].vendor_id, reference_to_self.device_list[reference_to_self.source_list[i]].product_id, &*reference_to_self.device_list[reference_to_self.source_list[i]].serial_number) {
+            let hid_device = match hidapi.open_serial(reference_to_self.device_list[source_device].vendor_id, reference_to_self.device_list[source_device].product_id, &*reference_to_self.device_list[source_device].serial_number) {
                 Ok(device) => device,
                 Err(_) => {
-                    reference_to_self.device_list[reference_to_self.source_list[i]].active = false;
-                    continue
-                },
+                    reference_to_self.device_list[source_device].active = false;
+                    continue;
+                }
             };
-            reference_to_self.device_list[reference_to_self.source_list[i]].active = true;
+            reference_to_self.device_list[source_device].active = true;
             hid_device.set_blocking_mode(false).expect("unable to set receiver blocking mode");
             source_devices.push(hid_device);
         }
@@ -352,9 +420,10 @@ impl ShiftTool {
         // List of device handles for the thread to write to
         let mut receiver_devices = vec![];
         // Loop for all receiver devices and open a handle to them
-        for i in 0..reference_to_self.receiver_list.len() {
+        for i in 0..reference_to_self.config.data.receivers.len() {
+            let receiver_device = reference_to_self.find_receiver_device_index(i);
             // product_id is the only unique value from the device
-            let hid_device = match hidapi.open_serial(reference_to_self.device_list[reference_to_self.receiver_list[i]].vendor_id, reference_to_self.device_list[reference_to_self.receiver_list[i]].product_id, &*reference_to_self.device_list[reference_to_self.receiver_list[i]].serial_number) {
+            let hid_device = match hidapi.open_serial(reference_to_self.device_list[receiver_device].vendor_id, reference_to_self.device_list[receiver_device].product_id, &*reference_to_self.device_list[receiver_device].serial_number) {
                 Ok(device) => device,
                 Err(_) => continue,
             };
@@ -430,7 +499,7 @@ impl ShiftTool {
                 for i in 0..8 {
                     let mut values: Vec<bool> = vec![];
                     for j in 0..shift_states.len() {
-                        if (&shared_source_state_enabled[j])[<u8 as Into<usize>>::into(i)] == true {
+                        if (&shared_sources[j].source_state_enabled)[<u8 as Into<usize>>::into(i)] == true {
                             values.push(read_bit(shift_states[j], i));
                         }
                     }
@@ -465,7 +534,6 @@ impl ShiftTool {
                             eprintln!("{}", e);
 
                             // Since we got an error sending the data, lets stop the thread
-                            //TODO: Maybe we don't want to do this without letting the user know?
                             let mut started = match lock.try_lock() {
                                 Ok(guard) => guard,
                                 Err(_) => continue,
@@ -502,232 +570,279 @@ impl ShiftTool {
         let hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
         self.refresh_devices(hidapi);
 
-        if self.source_list.len() == 0 {
-            self.source_list.push(0);
-            self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
-            self.source_state_enabled.push([true; 8]);
+        if self.config.data.sources.len() == 0 {
+            self.add_source();
         }
 
         ui.columns(
             2,
             |columns| {
-                // This is to output the data that we got from the source
-                for i in 0..self.source_list.len() {
-                    columns[0].horizontal(|ui| {
-                        let _ = ui.label(format!("Source {}", i+1));
-                        egui::ComboBox::from_id_source(format!("Source {}", i+1))
-                            .width(500.0)
-                            .selected_text(format!("{}", &self.device_list[self.source_list[i]]))
-                            .show_ui(ui, |ui| {
-                                for j in 0..self.device_list.len() {
-                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.source_list[i]].full_name, format!("{}", self.device_list[j]));
-                                    if value.clicked() && !thread_running {
-                                        self.source_list[i] = j;
-                                    }
-                                }
-                            });
-                    });
-                    columns[0].horizontal(|ui| {
-                        let state;
-                        {
-                            let &(ref lock2, ref _cvar) = &*self.source_states[i];
-                            state = *(lock2.lock().unwrap());
-                        }
+                self.create_source_dropdown(thread_running, columns);
+                self.create_shift_state_visual(thread_running, columns);
 
-                        let _ = ui.label("Shift:   ");
-                        let mut color;
-                        for j in 0..5 {
-                            let shift = read_bit(state, j);
-
-                            color = egui::Color32::default();
-                            if self.source_state_enabled[i][<u8 as Into<usize>>::into(j)] == false {
-                                color = DISABLED_COLOR;
-                            }
-                            if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
-                                self.source_state_enabled[i][<u8 as Into<usize>>::into(j)] = !self.source_state_enabled[i][<u8 as Into<usize>>::into(j)];
-                            };
-                        }
-
-                        // I'm not sure which of these 3 bits rep which mode
-                        let dtnt = read_bit(state, 5);
-                        let zoom = read_bit(state, 6);
-                        let trim = read_bit(state, 7);
-
-                        color = egui::Color32::default();
-                        if self.source_state_enabled[i][5] == false {
-                            color = DISABLED_COLOR;
-                        }
-                        if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
-                            self.source_state_enabled[i][5] = !self.source_state_enabled[i][5];
-                        }
-
-                        color = egui::Color32::default();
-                        if self.source_state_enabled[i][6] == false {
-                            color = DISABLED_COLOR;
-                        }
-                        if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
-                            self.source_state_enabled[i][6] = !self.source_state_enabled[i][6];
-                        }
-
-                        color = egui::Color32::default();
-                        if self.source_state_enabled[i][7] == false {
-                            color = DISABLED_COLOR;
-                        }
-                        if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
-                            self.source_state_enabled[i][7] = !self.source_state_enabled[i][7];
-                        }
-                        let active = self.device_list[self.source_list[i]].active;
-                        let mut active_text = "OFFLINE";
-                        if active == true {
-                            active_text = "ONLINE";
-                        }
-                        let _ = ui.selectable_label(active, active_text);
-                    });
-                    columns[0].separator();
-                }
-                columns[0].horizontal(|ui| {
-                    let _ = ui.label("Rules:");
-                    for j in 0..8 {
-                        let rule = self.shift_modifiers[j];
-                        if ui.selectable_label(false, format!("{}", rule)).clicked() && !thread_running {
-                            self.shift_modifiers[j] = match self.shift_modifiers[j] {
-                                ShiftModifiers::OR => ShiftModifiers::AND,
-                                ShiftModifiers::AND => ShiftModifiers::XOR,
-                                ShiftModifiers::XOR => ShiftModifiers::OR,
-                            }
-                        }
-                    }
-                });
-                columns[0].horizontal(|ui| {
-                    let state;
-                    {
-                        let &(ref lock2, ref _cvar) = &*self.shift_state;
-                        state = *(lock2.lock().unwrap());
-                    }
-
-                    let _ = ui.label("Result:");
-                    for j in 0..5 {
-                        let shift = read_bit(state, j);
-                        let _ = ui.selectable_label(shift, format!("{}", j + 1));
-                    }
-
-                    // I'm not sure which of these 3 bits rep which mode
-                    let dtnt = read_bit(state, 5);
-                    let zoom = read_bit(state, 6);
-                    let trim = read_bit(state, 7);
-
-                    let _ = ui.selectable_label(dtnt, "DTNT");
-                    let _ = ui.selectable_label(zoom, "ZOOM");
-                    let _ = ui.selectable_label(trim, "TRIM");
-                });
                 columns[0].separator();
-                for i in 0..self.receiver_list.len() {
+                for i in 0..self.config.data.receivers.len() {
+                    let receiver_device = self.find_receiver_device_index(i);
                     columns[0].horizontal(|ui| {
                         egui::ComboBox::from_id_source(i)
                             .width(500.0)
-                            .selected_text(format!("{}", &self.device_list[self.receiver_list[i]]))
+                            .selected_text(format!("{}", &self.device_list[receiver_device]))
                             .show_ui(ui, |ui| {
                                 for j in 0..self.device_list.len() {
-                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[self.receiver_list[i]].full_name, format!("{}", self.device_list[j]));
+                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[receiver_device].full_name, format!("{}", self.device_list[j]));
                                     if value.clicked() && !thread_running {
-                                        self.receiver_list[i] = j;
+                                        self.config.data.receivers[i].vendor_id = self.device_list[j].vendor_id;
+                                        self.config.data.receivers[i].product_id = self.device_list[j].product_id;
+                                        self.config.data.receivers[i].serial_number = self.device_list[j].serial_number.clone();
                                     }
                                 }
                             });
                     });
                 }
 
-                columns[1].vertical(|ui| {
-                    let mut color = egui::Color32::default();
-                    let mut start_stop_button_text = "Start";
-                    if thread_running {
-                        start_stop_button_text = "Stop";
+                self.create_control_buttons(ctx, thread_running, columns);
+            },
+        );
+    }
+
+    fn create_shift_state_visual(&mut self, thread_running: bool, columns: &mut [Ui]) {
+        columns[0].horizontal(|ui| {
+            let _ = ui.label("Rules:");
+            for j in 0..8 {
+                let rule = self.config.data.shift_modifiers[j];
+                if ui.selectable_label(false, format!("{}", rule)).clicked() && !thread_running {
+                    self.config.data.shift_modifiers[j] = match self.config.data.shift_modifiers[j] {
+                        ShiftModifiers::OR => ShiftModifiers::AND,
+                        ShiftModifiers::AND => ShiftModifiers::XOR,
+                        ShiftModifiers::XOR => ShiftModifiers::OR,
+                    }
+                }
+            }
+        });
+        columns[0].horizontal(|ui| {
+            let state;
+            {
+                let &(ref lock2, ref _cvar) = &*self.shift_state;
+                state = *(lock2.lock().unwrap());
+            }
+
+            let _ = ui.label("Result:");
+            for j in 0..5 {
+                let shift = read_bit(state, j);
+                let _ = ui.selectable_label(shift, format!("{}", j + 1));
+            }
+
+            // I'm not sure which of these 3 bits rep which mode
+            let dtnt = read_bit(state, 5);
+            let zoom = read_bit(state, 6);
+            let trim = read_bit(state, 7);
+
+            let _ = ui.selectable_label(dtnt, "DTNT");
+            let _ = ui.selectable_label(zoom, "ZOOM");
+            let _ = ui.selectable_label(trim, "TRIM");
+        });
+    }
+
+    fn create_source_dropdown(&mut self, thread_running: bool, columns: &mut [Ui]) {
+        for i in 0..self.config.data.sources.len() {
+            let source_device = self.find_source_device_index(i);
+            columns[0].horizontal(|ui| {
+                let _ = ui.label(format!("Source {}", i + 1));
+                egui::ComboBox::from_id_source(format!("Source {}", i + 1))
+                    .width(500.0)
+                    .selected_text(format!("{}", &self.device_list[source_device]))
+                    .show_ui(ui, |ui| {
+                        for j in 0..self.device_list.len() {
+                            let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[source_device].full_name, format!("{}", self.device_list[j]));
+                            if value.clicked() && !thread_running {
+                                self.config.data.sources[i].vendor_id = self.device_list[j].vendor_id;
+                                self.config.data.sources[i].product_id = self.device_list[j].product_id;
+                                self.config.data.sources[i].serial_number = self.device_list[j].serial_number.clone();
+                            }
+                        }
+                    });
+            });
+            columns[0].horizontal(|ui| {
+                let state;
+                {
+                    let &(ref lock2, ref _cvar) = &*self.source_states[i];
+                    state = *(lock2.lock().unwrap());
+                }
+
+                let _ = ui.label("Shift:   ");
+                let mut color;
+                for j in 0..5 {
+                    let shift = read_bit(state, j);
+
+                    color = egui::Color32::default();
+                    if self.config.data.sources[i].source_state_enabled[<u8 as Into<usize>>::into(j)] == false {
                         color = DISABLED_COLOR;
                     }
-                    if ui.button(egui::RichText::new(start_stop_button_text).background_color(color))
-                        .clicked() {
-                        // Don't do anything if we didn't select a source and receiver
-                        if self.source_list.len() == 0 || self.receiver_list.len() == 0 {
-                            return;
-                        }
+                    if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
+                        self.config.data.sources[i].source_state_enabled[<u8 as Into<usize>>::into(j)] = !self.config.data.sources[i].source_state_enabled[<u8 as Into<usize>>::into(j)];
+                    };
+                }
 
-                        #[cfg(feature = "logging")] {
-                            trace!("Toggling run thread...");
-                        }
-                        let is_started;
+                // I'm not sure which of these 3 bits rep which mode
+                let dtnt = read_bit(state, 5);
+                let zoom = read_bit(state, 6);
+                let trim = read_bit(state, 7);
+
+                color = egui::Color32::default();
+                if self.config.data.sources[i].source_state_enabled[5] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
+                    self.config.data.sources[i].source_state_enabled[5] = !self.config.data.sources[i].source_state_enabled[5];
+                }
+
+                color = egui::Color32::default();
+                if self.config.data.sources[i].source_state_enabled[6] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
+                    self.config.data.sources[i].source_state_enabled[6] = !self.config.data.sources[i].source_state_enabled[6];
+                }
+
+                color = egui::Color32::default();
+                if self.config.data.sources[i].source_state_enabled[7] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
+                    self.config.data.sources[i].source_state_enabled[7] = !self.config.data.sources[i].source_state_enabled[7];
+                }
+                let active = self.device_list[source_device].active;
+                let mut active_text = "OFFLINE";
+                if active == true {
+                    active_text = "ONLINE";
+                }
+                let _ = ui.selectable_label(active, active_text);
+            });
+            columns[0].separator();
+        }
+    }
+
+    fn create_control_buttons(&mut self, ctx: &Context, thread_running: bool, columns: &mut [Ui]) {
+        columns[1].vertical(|ui| {
+            let mut color = egui::Color32::default();
+            let mut start_stop_button_text = "Start";
+            if thread_running {
+                start_stop_button_text = "Stop";
+                color = DISABLED_COLOR;
+            }
+            if ui.button(egui::RichText::new(start_stop_button_text).background_color(color))
+                .clicked() {
+                // Don't do anything if we didn't select a source and receiver
+                if self.config.data.sources.len() == 0 || self.config.data.receivers.len() == 0 {
+                    return;
+                }
+
+                #[cfg(feature = "logging")] {
+                    trace!("Toggling run thread...");
+                }
+                let is_started;
+                {
+                    let &(ref lock, ref cvar) = &*self.thread_state;
+                    let mut started = lock.lock().unwrap();
+                    is_started = *started;
+                    *started = !*started;
+                    cvar.notify_all();
+                }
+
+                if !is_started {
+                    if !self.spawn_worker() {
                         {
                             let &(ref lock, ref cvar) = &*self.thread_state;
                             let mut started = lock.lock().unwrap();
-                            is_started = *started;
-                            *started = !*started;
+                            *started = false;
                             cvar.notify_all();
                         }
-
-                        if !is_started {
-                            if !self.spawn_worker() {
-                                {
-                                    let &(ref lock, ref cvar) = &*self.thread_state;
-                                    let mut started = lock.lock().unwrap();
-                                    *started = false;
-                                    cvar.notify_all();
-                                }
-                            }
-                        } else {
-                            for source_state in self.source_states.clone() {
-                                {
-                                    // reset each source state
-                                    let &(ref lock, ref cvar) = &*source_state;
-                                    let mut state = lock.lock().unwrap();
-                                    *state = 0;
-                                    cvar.notify_all();
-                                }
-                            }
-                            {
-                                // reset result state
-                                let &(ref lock, ref cvar) = &*self.shift_state;
-                                let mut state = lock.lock().unwrap();
-                                *state = 0;
-                                cvar.notify_all();
-                            }
-                            for i in 0..self.device_list.len() {
-                                self.device_list[i].active = false;
-                            }
-                        }
-                        #[cfg(feature = "logging")] {
-                            trace!("Done");
+                    }
+                } else {
+                    for source_state in self.source_states.clone() {
+                        {
+                            // reset each source state
+                            let &(ref lock, ref cvar) = &*source_state;
+                            let mut state = lock.lock().unwrap();
+                            *state = 0;
+                            cvar.notify_all();
                         }
                     }
+                    {
+                        // reset result state
+                        let &(ref lock, ref cvar) = &*self.shift_state;
+                        let mut state = lock.lock().unwrap();
+                        *state = 0;
+                        cvar.notify_all();
+                    }
+                    for i in 0..self.device_list.len() {
+                        self.device_list[i].active = false;
+                    }
+                }
 
-                    if ui.add_enabled(!thread_running, egui::Button::new("Add Source")).clicked() {
-                        self.source_list.push(0);
-                        self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
-                        self.source_state_enabled.push([true; 8]);
-                    }
-                    if self.source_list.len() > 1 && ui.add_enabled(!thread_running, egui::Button::new("Remove Source")).clicked() {
-
-                        self.source_list.pop();
-                        self.source_states.pop();
-                        self.source_state_enabled.pop();
-
-                    }
-
-                    if ui.add_enabled(!thread_running, egui::Button::new("Add Receiver")).clicked() {
-                        self.receiver_list.push(0);
-                    }
-
-                    if self.receiver_list.len() > 0 && ui.add_enabled(!thread_running, egui::Button::new("Remove Receiver")).clicked() {
-                        self.receiver_list.pop();
-                    }
-                    // if columns[1].button("Save").clicked() {}
-                    if ui.button("About").clicked() {
-                        self.state = State::About;
-                    }
-                    if ui.button("Exit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
+                let _ = self.config.save();
+                #[cfg(feature = "logging")] {
+                    trace!("Done");
+                }
             }
-        );
+
+            if ui.add_enabled(!thread_running, egui::Button::new("Add Source")).clicked() {
+                self.add_source();
+            }
+            if self.config.data.sources.len() > 1 && ui.add_enabled(!thread_running, egui::Button::new("Remove Source")).clicked() {
+                self.remove_source();
+            }
+
+            if ui.add_enabled(!thread_running, egui::Button::new("Add Receiver")).clicked() {
+                self.add_receiver();
+            }
+
+            if self.config.data.receivers.len() > 0 && ui.add_enabled(!thread_running, egui::Button::new("Remove Receiver")).clicked() {
+                self.remove_receiver();
+            }
+            // if columns[1].button("Save").clicked() {}
+            if ui.button("About").clicked() {
+                self.state = State::About;
+            }
+            if ui.button("Exit").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+    }
+
+    fn remove_receiver(&mut self) {
+        self.config.data.receivers.pop();
+    }
+
+    fn add_receiver(&mut self) {
+        if self.state != State::Initialising {
+            self.config.data.receivers.push(SavedDevice::default());
+        }
+    }
+
+    fn add_source(&mut self) {
+        self.source_states.push(Arc::new((Mutex::new(0), Condvar::new())));
+        if self.state != State::Initialising {
+            self.config.data.sources.push(SavedDevice::default());
+        }
+    }
+
+    fn remove_source(&mut self) {
+        self.source_states.pop();
+        self.config.data.sources.pop();
+    }
+
+    fn shutdown(&mut self) {
+        // Make sure we clean up our thread
+        {
+            let &(ref lock, ref cvar) = &*self.thread_state;
+            let mut started = lock.lock().unwrap();
+            *started = false;
+            cvar.notify_all();
+        }
+        // Give the thread some time to get the shutdown event
+        let _ = self.config.save();
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -755,15 +870,7 @@ impl eframe::App for ShiftTool {
         #[cfg(feature = "logging")] {
             info!("Shutting down...");
         }
-        // Make sure we clean up our thread
-        {
-            let &(ref lock, ref cvar) = &*self.thread_state;
-            let mut started = lock.lock().unwrap();
-            *started = false;
-            cvar.notify_all();
-        }
-        // Give the thread some time to get the shutdown event
-        thread::sleep(Duration::from_millis(200));
+        self.shutdown();
         #[cfg(feature = "logging")] {
             info!("Done");
         }
