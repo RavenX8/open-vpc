@@ -315,6 +315,7 @@ impl ShiftTool {
         //     self.device_list.clear();
         // }
 
+        let mut old_devices: Vec<VpcDevice> = vec![];
         let mut new_devices: Vec<VpcDevice> = vec![];
         for device in hidapi.device_list() {
             let full_name = calculate_full_device_name(device);
@@ -324,26 +325,39 @@ impl ShiftTool {
             let firmware_string = device.manufacturer_string().unwrap_or_else(|| "");
             let device_name = device.product_string().unwrap_or_else(|| "");
             let serial = device.serial_number().unwrap_or_default();
-            let mut found = false;
+            let mut found = 0;
             if !self.device_list.is_empty() {
-                found = self.device_list.iter().any(|r| r.vendor_id == device.vendor_id()
+                found = self.device_list.iter().position(|r| r.vendor_id == device.vendor_id()
                     && r.product_id == device.product_id()
                     && r.serial_number == serial.to_string()
-                );
+                ).unwrap_or_default();
             }
+            if found != 0 {
+                old_devices.push(self.device_list[found].clone());
+                continue;
+            }
+
+            if is_supported(firmware_string.to_owned().into()) {
+                new_devices.push(VpcDevice {
+                    full_name: full_name.to_string(),
+                    name: device_name.to_owned().into(),
+                    firmware: firmware_string.to_owned().into(),
+                    vendor_id: device.vendor_id(),
+                    product_id: device.product_id(),
+                    serial_number: serial.to_string(),
+                    usage: device.usage(),
+                    active: false,
+                });
+            }
+        }
+        for device_idx in 0..self.device_list.len() {
+            let device = &self.device_list[device_idx];
+            let found = old_devices.iter().any(|r| r.vendor_id == device.vendor_id
+                && r.product_id == device.product_id
+                && r.serial_number == device.serial_number
+            );
             if !found {
-                if is_supported(firmware_string.to_owned().into()) {
-                    new_devices.push(VpcDevice {
-                        full_name: full_name.to_string(),
-                        name: device_name.to_owned().into(),
-                        firmware: firmware_string.to_owned().into(),
-                        vendor_id: device.vendor_id(),
-                        product_id: device.product_id(),
-                        serial_number: serial.to_string(),
-                        usage: device.usage(),
-                        active: false,
-                    });
-                }
+                self.device_list[device_idx].active = false;
             }
         }
 
@@ -425,8 +439,12 @@ impl ShiftTool {
             // product_id is the only unique value from the device
             let hid_device = match hidapi.open_serial(reference_to_self.device_list[receiver_device].vendor_id, reference_to_self.device_list[receiver_device].product_id, &*reference_to_self.device_list[receiver_device].serial_number) {
                 Ok(device) => device,
-                Err(_) => continue,
+                Err(_) => {
+                    reference_to_self.device_list[receiver_device].active = false;
+                    continue;
+                },
             };
+            reference_to_self.device_list[receiver_device].active = true;
             hid_device.set_blocking_mode(false).expect("unable to set receiver blocking mode");
             receiver_devices.push(hid_device);
         }
@@ -469,15 +487,17 @@ impl ShiftTool {
                 for device in &source_devices {
                     match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
-                        Err(e) => {
-                            error!("{}", e);
+                        Err(_e) => {
+                            // error!("{}", e);
+                            shift_states[index] = 0;
 
-                            let mut started = match lock.try_lock() {
-                                Ok(guard) => guard,
-                                Err(_) => continue, // Retry if the lock couldn't be acquired immediately
-                            };
-                            *started = false;
-                            break;
+                            // let mut started = match lock.try_lock() {
+                            //     Ok(guard) => guard,
+                            //     Err(_) => continue, // Retry if the lock couldn't be acquired immediately
+                            // };
+                            // *started = false;
+                            // break;
+                            continue;
                         }
                     };
 
@@ -530,16 +550,17 @@ impl ShiftTool {
                 for device in &receiver_devices {
                     match device.send_feature_report(&mut finalbuf) {
                         Ok(bytes_written) => bytes_written,
-                        Err(e) => {
-                            eprintln!("{}", e);
+                        Err(_e) => {
+                            // eprintln!("{}", e);
 
                             // Since we got an error sending the data, lets stop the thread
-                            let mut started = match lock.try_lock() {
-                                Ok(guard) => guard,
-                                Err(_) => continue,
-                            };
-                            *started = false;
-                            break;
+                            // let mut started = match lock.try_lock() {
+                            //     Ok(guard) => guard,
+                            //     Err(_) => continue,
+                            // };
+                            // *started = false;
+                            // break;
+                            continue;
                         }
                     };
                 }
@@ -597,6 +618,13 @@ impl ShiftTool {
                                     }
                                 }
                             });
+
+                        let active = self.device_list[receiver_device].active;
+                        let mut active_text = "OFFLINE";
+                        if active == true {
+                            active_text = "ONLINE";
+                        }
+                        let _ = ui.selectable_label(active, active_text);
                     });
                 }
 
