@@ -105,7 +105,7 @@ struct SavedDevice {
     vendor_id: u16,
     product_id: u16,
     serial_number: String,
-    source_state_enabled: [bool; 8],
+    state_enabled: [bool; 8],
 }
 
 impl Default for SavedDevice {
@@ -114,7 +114,7 @@ impl Default for SavedDevice {
             vendor_id: 0,
             product_id: 0,
             serial_number: String::from(""),
-            source_state_enabled: [true; 8],
+            state_enabled: [true; 8],
         }
     }
 }
@@ -214,6 +214,7 @@ struct ShiftTool {
     state: State,
     device_list: Vec<VpcDevice>,
     source_states: Vec<Arc<(Mutex<u16>, Condvar)>>,
+    receiver_states: Vec<Arc<(Mutex<u16>, Condvar)>>,
     shift_state: Arc<(Mutex<u16>, Condvar)>,
     thread_state: Arc<(Mutex<bool>, Condvar)>,
     config: Config<ConfigData>,
@@ -225,6 +226,7 @@ impl Default for ShiftTool {
             state: State::Initialising,
             device_list: vec![],
             source_states: vec![],
+            receiver_states: vec![],
             shift_state: Arc::new((Mutex::new(0), Condvar::new())),
             thread_state: Arc::new((Mutex::new(false), Condvar::new())),
             config: Config::new(format!("{}/shift_tool.json", dirs::config_dir().unwrap_or_default().to_str().unwrap_or_default()), ConfigData::default()).unwrap(),
@@ -385,8 +387,10 @@ impl ShiftTool {
     fn spawn_worker(&mut self) -> bool {
         let reference_to_self = self;
         let shared_shift_state = reference_to_self.source_states.clone();
+        let shared_receiver_shift_state = reference_to_self.receiver_states.clone();
         let shared_shift_modifiers = reference_to_self.config.data.shift_modifiers.clone();
         let shared_sources = reference_to_self.config.data.sources.clone();
+        let shared_receivers = reference_to_self.config.data.receivers.clone();
         let shared_final_shift_state = reference_to_self.shift_state.clone();
         let shared_run_state = reference_to_self.thread_state.clone();
         let mut hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
@@ -519,7 +523,7 @@ impl ShiftTool {
                 for i in 0..8 {
                     let mut values: Vec<bool> = vec![];
                     for j in 0..shift_states.len() {
-                        if (&shared_sources[j].source_state_enabled)[<u8 as Into<usize>>::into(i)] == true {
+                        if (&shared_sources[j].state_enabled)[<u8 as Into<usize>>::into(i)] == true {
                             values.push(read_bit(shift_states[j], i));
                         }
                     }
@@ -547,8 +551,28 @@ impl ShiftTool {
 
                 // println!("Sending data...");
                 // This sends the shift data read from the source device directly to the receivers
+                index = 0; // Reset the device index
+                let mut final_temp_buf: [u8; 3] = finalbuf.clone();
                 for device in &receiver_devices {
-                    match device.send_feature_report(&mut finalbuf) {
+                    for i in 0..8 {
+                        if (&shared_receivers[index].state_enabled)[<u8 as Into<usize>>::into(i)] == false {
+                            final_temp_buf[1] = set_bit(final_temp_buf[1], i, false);
+                        }
+                    }
+
+                    {
+                        // notify the main gui of the current shift state.
+                        // This is only to show the current state on the GUI.
+                        let &(ref lock2, ref _cvar2) = &*shared_receiver_shift_state[index];
+                        // Attempt to acquire the lock
+                        let mut shift = match lock2.try_lock() {
+                            Ok(guard) => guard,
+                            Err(_) => continue, // Retry if the lock couldn't be acquired immediately
+                        };
+                        *shift = merge_u8_into_u16(final_temp_buf[2], final_temp_buf[1]);
+                    }
+
+                    match device.send_feature_report(&mut final_temp_buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(_e) => {
                             // eprintln!("{}", e);
@@ -563,6 +587,7 @@ impl ShiftTool {
                             continue;
                         }
                     };
+                    index = index + 1;
                 }
 
                 // Make sure we clear the buffer
@@ -618,14 +643,8 @@ impl ShiftTool {
                                     }
                                 }
                             });
-
-                        let active = self.device_list[receiver_device].active;
-                        let mut active_text = "OFFLINE";
-                        if active == true {
-                            active_text = "ONLINE";
-                        }
-                        let _ = ui.selectable_label(active, active_text);
                     });
+                    self.create_status_data(thread_running, columns, i, receiver_device, true);
                 }
 
                 self.create_control_buttons(ctx, thread_running, columns);
@@ -690,24 +709,33 @@ impl ShiftTool {
                         }
                     });
             });
-            columns[0].horizontal(|ui| {
-                let state;
+            self.create_status_data(thread_running, columns, i, source_device, false);
+            columns[0].separator();
+        }
+    }
+
+    fn create_status_data(&mut self, thread_running: bool, columns: &mut [Ui], i: usize, device_index: usize, is_receiver: bool) {
+        columns[0].horizontal(|ui| {
+            let state;
+
+            let _ = ui.label("Shift:   ");
+            let mut color;
+
+            if is_receiver {
                 {
-                    let &(ref lock2, ref _cvar) = &*self.source_states[i];
+                    let &(ref lock2, ref _cvar) = &*self.receiver_states[i];
                     state = *(lock2.lock().unwrap());
                 }
 
-                let _ = ui.label("Shift:   ");
-                let mut color;
                 for j in 0..5 {
                     let shift = read_bit(state, j);
 
                     color = egui::Color32::default();
-                    if self.config.data.sources[i].source_state_enabled[<u8 as Into<usize>>::into(j)] == false {
+                    if self.config.data.receivers[i].state_enabled[<u8 as Into<usize>>::into(j)] == false {
                         color = DISABLED_COLOR;
                     }
                     if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
-                        self.config.data.sources[i].source_state_enabled[<u8 as Into<usize>>::into(j)] = !self.config.data.sources[i].source_state_enabled[<u8 as Into<usize>>::into(j)];
+                        self.config.data.receivers[i].state_enabled[<u8 as Into<usize>>::into(j)] = !self.config.data.receivers[i].state_enabled[<u8 as Into<usize>>::into(j)];
                     };
                 }
 
@@ -717,37 +745,84 @@ impl ShiftTool {
                 let trim = read_bit(state, 7);
 
                 color = egui::Color32::default();
-                if self.config.data.sources[i].source_state_enabled[5] == false {
+                if self.config.data.receivers[i].state_enabled[5] == false {
                     color = DISABLED_COLOR;
                 }
                 if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
-                    self.config.data.sources[i].source_state_enabled[5] = !self.config.data.sources[i].source_state_enabled[5];
+                    self.config.data.receivers[i].state_enabled[5] = !self.config.data.receivers[i].state_enabled[5];
                 }
 
                 color = egui::Color32::default();
-                if self.config.data.sources[i].source_state_enabled[6] == false {
+                if self.config.data.receivers[i].state_enabled[6] == false {
                     color = DISABLED_COLOR;
                 }
                 if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
-                    self.config.data.sources[i].source_state_enabled[6] = !self.config.data.sources[i].source_state_enabled[6];
+                    self.config.data.receivers[i].state_enabled[6] = !self.config.data.receivers[i].state_enabled[6];
                 }
 
                 color = egui::Color32::default();
-                if self.config.data.sources[i].source_state_enabled[7] == false {
+                if self.config.data.receivers[i].state_enabled[7] == false {
                     color = DISABLED_COLOR;
                 }
                 if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
-                    self.config.data.sources[i].source_state_enabled[7] = !self.config.data.sources[i].source_state_enabled[7];
+                    self.config.data.receivers[i].state_enabled[7] = !self.config.data.receivers[i].state_enabled[7];
                 }
-                let active = self.device_list[source_device].active;
-                let mut active_text = "OFFLINE";
-                if active == true {
-                    active_text = "ONLINE";
+            }
+            else {
+                {
+                    let &(ref lock2, ref _cvar) = &*self.source_states[i];
+                    state = *(lock2.lock().unwrap());
                 }
-                let _ = ui.selectable_label(active, active_text);
-            });
-            columns[0].separator();
-        }
+
+                for j in 0..5 {
+                    let shift = read_bit(state, j);
+
+                    color = egui::Color32::default();
+                    if self.config.data.sources[i].state_enabled[<u8 as Into<usize>>::into(j)] == false {
+                        color = DISABLED_COLOR;
+                    }
+                    if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
+                        self.config.data.sources[i].state_enabled[<u8 as Into<usize>>::into(j)] = !self.config.data.sources[i].state_enabled[<u8 as Into<usize>>::into(j)];
+                    };
+                }
+
+                // I'm not sure which of these 3 bits rep which mode
+                let dtnt = read_bit(state, 5);
+                let zoom = read_bit(state, 6);
+                let trim = read_bit(state, 7);
+
+                color = egui::Color32::default();
+                if self.config.data.sources[i].state_enabled[5] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
+                    self.config.data.sources[i].state_enabled[5] = !self.config.data.sources[i].state_enabled[5];
+                }
+
+                color = egui::Color32::default();
+                if self.config.data.sources[i].state_enabled[6] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
+                    self.config.data.sources[i].state_enabled[6] = !self.config.data.sources[i].state_enabled[6];
+                }
+
+                color = egui::Color32::default();
+                if self.config.data.sources[i].state_enabled[7] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
+                    self.config.data.sources[i].state_enabled[7] = !self.config.data.sources[i].state_enabled[7];
+                }
+            }
+
+            let active = self.device_list[device_index].active;
+            let mut active_text = "OFFLINE";
+            if active == true {
+                active_text = "ONLINE";
+            }
+            let _ = ui.selectable_label(active, active_text);
+        });
     }
 
     fn create_control_buttons(&mut self, ctx: &Context, thread_running: bool, columns: &mut [Ui]) {
@@ -796,6 +871,15 @@ impl ShiftTool {
                             cvar.notify_all();
                         }
                     }
+                    for receiver_state in self.receiver_states.clone() {
+                        {
+                            // reset each source state
+                            let &(ref lock, ref cvar) = &*receiver_state;
+                            let mut state = lock.lock().unwrap();
+                            *state = 0;
+                            cvar.notify_all();
+                        }
+                    }
                     {
                         // reset result state
                         let &(ref lock, ref cvar) = &*self.shift_state;
@@ -839,10 +923,12 @@ impl ShiftTool {
     }
 
     fn remove_receiver(&mut self) {
+        self.receiver_states.pop();
         self.config.data.receivers.pop();
     }
 
     fn add_receiver(&mut self) {
+        self.receiver_states.push(Arc::new((Mutex::new(0), Condvar::new())));
         if self.state != State::Initialising {
             self.config.data.receivers.push(SavedDevice::default());
         }
