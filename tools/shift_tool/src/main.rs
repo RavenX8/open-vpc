@@ -489,6 +489,14 @@ impl ShiftTool {
                 finalbuf[0] = 0x04;
                 let mut index = 0;
                 for device in &source_devices {
+                    buf[1] = 0; buf[2] = 0;
+                    // Reset the device state, this is so we can get a fresh REAL device state
+                    match device.send_feature_report(&mut buf) {
+                        Ok(bytes_written) => bytes_written,
+                        Err(_e) => continue,
+                    };
+
+                    // Get the REAL device state
                     match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(_e) => {
@@ -552,33 +560,42 @@ impl ShiftTool {
                 // println!("Sending data...");
                 // This sends the shift data read from the source device directly to the receivers
                 index = 0; // Reset the device index
-                let mut final_temp_buf: [u8; 3] = finalbuf.clone();
                 for device in &receiver_devices {
+                    let mut final_temp_buf: [u8; 3] = finalbuf.clone();
+
+                    buf[1] = 0; buf[2] = 0;
+                    // Reset the device state, this is so we can get a fresh REAL device state
+                    match device.send_feature_report(&mut buf) {
+                        Ok(bytes_written) => bytes_written,
+                        Err(_e) => continue,
+                    };
+
+                    // Filter the final state for this device
                     for i in 0..8 {
                         if (&shared_receivers[index].state_enabled)[<u8 as Into<usize>>::into(i)] == false {
                             final_temp_buf[1] = set_bit(final_temp_buf[1], i, false);
                         }
                     }
 
-                    match device.send_feature_report(&mut final_temp_buf) {
+                    // Get the devices own REAL shift state
+                    match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(_e) => {
-                            // eprintln!("{}", e);
-
-                            // Since we got an error sending the data, lets stop the thread
-                            // let mut started = match lock.try_lock() {
-                            //     Ok(guard) => guard,
-                            //     Err(_) => continue,
-                            // };
-                            // *started = false;
-                            // break;
                             continue;
                         }
                     };
 
-                    buf[1] = 0;
-                    buf[2] = 0;
-                    // Get the devices own shift state
+                    // Merge the real state and the final sent state together
+                    final_temp_buf[1] |= buf[1];
+
+                    // Send the new state to the device
+                    match device.send_feature_report(&mut final_temp_buf) {
+                        Ok(bytes_written) => bytes_written,
+                        Err(_e) => continue,
+                    };
+
+                    buf[1] = 0; buf[2] = 0;
+                    // Get the devices new shift state
                     match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(_e) => {
@@ -597,6 +614,8 @@ impl ShiftTool {
                         };
                         *shift = merge_u8_into_u16(buf[2], buf[1]);
                     }
+
+                    // Go to the next device state index
                     index = index + 1;
                 }
 
