@@ -479,6 +479,20 @@ impl ShiftTool {
 
                     // Check if the thread should exit
                     if !*started {
+                        // Clear all device states here before closing
+                        buf = [0x04, 0x00, 0x00];
+                        for device in &source_devices {
+                            match device.send_feature_report(&mut buf) {
+                                Ok(bytes_written) => bytes_written,
+                                Err(_e) => continue,
+                            };
+                        }
+                        for device in &receiver_devices {
+                            match device.send_feature_report(&mut buf) {
+                                Ok(bytes_written) => bytes_written,
+                                Err(_e) => continue,
+                            };
+                        }
                         break; // Exit the loop if the variable is false
                     }
                 }
