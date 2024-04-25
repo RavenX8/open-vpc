@@ -560,18 +560,6 @@ impl ShiftTool {
                         }
                     }
 
-                    {
-                        // notify the main gui of the current shift state.
-                        // This is only to show the current state on the GUI.
-                        let &(ref lock2, ref _cvar2) = &*shared_receiver_shift_state[index];
-                        // Attempt to acquire the lock
-                        let mut shift = match lock2.try_lock() {
-                            Ok(guard) => guard,
-                            Err(_) => continue, // Retry if the lock couldn't be acquired immediately
-                        };
-                        *shift = merge_u8_into_u16(final_temp_buf[2], final_temp_buf[1]);
-                    }
-
                     match device.send_feature_report(&mut final_temp_buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(_e) => {
@@ -587,6 +575,28 @@ impl ShiftTool {
                             continue;
                         }
                     };
+
+                    buf[1] = 0;
+                    buf[2] = 0;
+                    // Get the devices own shift state
+                    match device.get_feature_report(&mut buf) {
+                        Ok(bytes_written) => bytes_written,
+                        Err(_e) => {
+                            continue;
+                        }
+                    };
+
+                    {
+                        // notify the main gui of the current shift state.
+                        // This is only to show the current state on the GUI.
+                        let &(ref lock2, ref _cvar2) = &*shared_receiver_shift_state[index];
+                        // Attempt to acquire the lock
+                        let mut shift = match lock2.try_lock() {
+                            Ok(guard) => guard,
+                            Err(_) => continue, // Retry if the lock couldn't be acquired immediately
+                        };
+                        *shift = merge_u8_into_u16(buf[2], buf[1]);
+                    }
                     index = index + 1;
                 }
 
