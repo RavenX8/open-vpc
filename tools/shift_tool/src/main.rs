@@ -444,7 +444,7 @@ impl ShiftTool {
                 Err(_) => {
                     reference_to_self.device_list[receiver_device].active = false;
                     continue;
-                },
+                }
             };
             reference_to_self.device_list[receiver_device].active = true;
             hid_device.set_blocking_mode(false).expect("unable to set receiver blocking mode");
@@ -501,7 +501,8 @@ impl ShiftTool {
                 finalbuf[0] = 0x04;
                 let mut index = 0;
                 for device in &mut source_devices {
-                    buf[1] = 0; buf[2] = 0;
+                    buf[1] = 0;
+                    buf[2] = 0;
                     // Reset the device state, this is so we can get a fresh REAL device state
                     match device.send_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
@@ -511,12 +512,12 @@ impl ShiftTool {
                                 Err(_) => {
                                     shift_states[index] = 0;
                                     continue;
-                                },
+                                }
                             };
                             // We were able to reopen the device so store it
                             let _ = std::mem::replace(device, hid_device);
                             continue;
-                        },
+                        }
                     };
 
                     // Get the REAL device state
@@ -578,7 +579,8 @@ impl ShiftTool {
                 for device in &mut receiver_devices {
                     let mut final_temp_buf: [u8; 3] = finalbuf.clone();
 
-                    buf[1] = 0; buf[2] = 0;
+                    buf[1] = 0;
+                    buf[2] = 0;
                     // Reset the device state, this is so we can get a fresh REAL device state
                     match device.send_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
@@ -591,7 +593,7 @@ impl ShiftTool {
                             // We were able to reopen the device so store it
                             let _ = std::mem::replace(device, hid_device);
                             continue;
-                        },
+                        }
                     };
 
                     // Filter the final state for this device
@@ -618,7 +620,8 @@ impl ShiftTool {
                         Err(_e) => continue,
                     };
 
-                    buf[1] = 0; buf[2] = 0;
+                    buf[1] = 0;
+                    buf[2] = 0;
                     // Get the devices new shift state
                     match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
@@ -677,35 +680,38 @@ impl ShiftTool {
             2,
             |columns| {
                 self.create_source_dropdown(thread_running, columns);
-                self.create_shift_state_visual(thread_running, columns);
-
-                columns[0].separator();
-                for i in 0..self.config.data.receivers.len() {
-                    let receiver_device = self.find_receiver_device_index(i);
-                    columns[0].horizontal(|ui| {
-                        egui::ComboBox::from_id_source(i)
-                            .width(500.0)
-                            .selected_text(format!("{}", &self.device_list[receiver_device]))
-                            .show_ui(ui, |ui| {
-                                for j in 0..self.device_list.len() {
-                                    let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[receiver_device].full_name, format!("{}", self.device_list[j]));
-                                    if value.clicked() && !thread_running {
-                                        self.config.data.receivers[i].vendor_id = self.device_list[j].vendor_id;
-                                        self.config.data.receivers[i].product_id = self.device_list[j].product_id;
-                                        self.config.data.receivers[i].serial_number = self.device_list[j].serial_number.clone();
-                                    }
-                                }
-                            });
-                    });
-                    self.create_status_data(thread_running, columns, i, receiver_device, true);
-                }
-
+                self.create_result_state_visual(thread_running, columns);
+                self.create_receiver_dropdown(thread_running, columns);
                 self.create_control_buttons(ctx, thread_running, columns);
             },
         );
     }
 
-    fn create_shift_state_visual(&mut self, thread_running: bool, columns: &mut [Ui]) {
+    fn create_source_dropdown(&mut self, thread_running: bool, columns: &mut [Ui]) {
+        for i in 0..self.config.data.sources.len() {
+            let source_device = self.find_source_device_index(i);
+            columns[0].horizontal(|ui| {
+                let _ = ui.label(format!("Source {}", i + 1));
+                egui::ComboBox::from_id_source(format!("Source {}", i + 1))
+                    .width(500.0)
+                    .selected_text(format!("{}", &self.device_list[source_device]))
+                    .show_ui(ui, |ui| {
+                        for j in 0..self.device_list.len() {
+                            let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[source_device].full_name, format!("{}", self.device_list[j]));
+                            if value.clicked() && !thread_running {
+                                self.config.data.sources[i].vendor_id = self.device_list[j].vendor_id;
+                                self.config.data.sources[i].product_id = self.device_list[j].product_id;
+                                self.config.data.sources[i].serial_number = self.device_list[j].serial_number.clone();
+                            }
+                        }
+                    });
+            });
+            self.create_status_data(thread_running, columns, i, source_device, false);
+            columns[0].separator();
+        }
+    }
+
+    fn create_result_state_visual(&mut self, thread_running: bool, columns: &mut [Ui]) {
         columns[0].horizontal(|ui| {
             let _ = ui.label("Rules:");
             for j in 0..8 {
@@ -741,29 +747,28 @@ impl ShiftTool {
             let _ = ui.selectable_label(zoom, "ZOOM");
             let _ = ui.selectable_label(trim, "TRIM");
         });
+        columns[0].separator();
     }
 
-    fn create_source_dropdown(&mut self, thread_running: bool, columns: &mut [Ui]) {
-        for i in 0..self.config.data.sources.len() {
-            let source_device = self.find_source_device_index(i);
+    fn create_receiver_dropdown(&mut self, thread_running: bool, columns: &mut [Ui]) {
+        for i in 0..self.config.data.receivers.len() {
+            let receiver_device = self.find_receiver_device_index(i);
             columns[0].horizontal(|ui| {
-                let _ = ui.label(format!("Source {}", i + 1));
-                egui::ComboBox::from_id_source(format!("Source {}", i + 1))
+                egui::ComboBox::from_id_source(i)
                     .width(500.0)
-                    .selected_text(format!("{}", &self.device_list[source_device]))
+                    .selected_text(format!("{}", &self.device_list[receiver_device]))
                     .show_ui(ui, |ui| {
                         for j in 0..self.device_list.len() {
-                            let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[source_device].full_name, format!("{}", self.device_list[j]));
+                            let value = ui.selectable_value(&mut &self.device_list[j].full_name, &self.device_list[receiver_device].full_name, format!("{}", self.device_list[j]));
                             if value.clicked() && !thread_running {
-                                self.config.data.sources[i].vendor_id = self.device_list[j].vendor_id;
-                                self.config.data.sources[i].product_id = self.device_list[j].product_id;
-                                self.config.data.sources[i].serial_number = self.device_list[j].serial_number.clone();
+                                self.config.data.receivers[i].vendor_id = self.device_list[j].vendor_id;
+                                self.config.data.receivers[i].product_id = self.device_list[j].product_id;
+                                self.config.data.receivers[i].serial_number = self.device_list[j].serial_number.clone();
                             }
                         }
                     });
             });
-            self.create_status_data(thread_running, columns, i, source_device, false);
-            columns[0].separator();
+            self.create_status_data(thread_running, columns, i, receiver_device, true);
         }
     }
 
@@ -781,8 +786,7 @@ impl ShiftTool {
                     let &(ref lock2, ref _cvar) = &*self.receiver_states[i];
                     state = *(lock2.lock().unwrap());
                 }
-            }
-            else {
+            } else {
                 {
                     let &(ref lock2, ref _cvar) = &*self.source_states[i];
                     state = *(lock2.lock().unwrap());
