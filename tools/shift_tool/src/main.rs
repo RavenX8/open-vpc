@@ -358,9 +358,7 @@ impl ShiftTool {
                 && r.product_id == device.product_id
                 && r.serial_number == device.serial_number
             );
-            if !found {
-                self.device_list[device_idx].active = false;
-            }
+            self.device_list[device_idx].active = found;
         }
 
         if !new_devices.is_empty() {
@@ -502,27 +500,30 @@ impl ShiftTool {
                 buf[0] = 0x04;
                 finalbuf[0] = 0x04;
                 let mut index = 0;
-                for device in &source_devices {
+                for device in &mut source_devices {
                     buf[1] = 0; buf[2] = 0;
                     // Reset the device state, this is so we can get a fresh REAL device state
                     match device.send_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
-                        Err(_e) => continue,
+                        Err(_e) => {
+                            let hid_device = match hidapi.open_serial(shared_sources[index].vendor_id, shared_sources[index].product_id, &*shared_sources[index].serial_number) {
+                                Ok(device) => device,
+                                Err(_) => {
+                                    shift_states[index] = 0;
+                                    continue;
+                                },
+                            };
+                            // We were able to reopen the device so store it
+                            let _ = std::mem::replace(device, hid_device);
+                            continue;
+                        },
                     };
 
                     // Get the REAL device state
                     match device.get_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
                         Err(_e) => {
-                            // error!("{}", e);
                             shift_states[index] = 0;
-
-                            // let mut started = match lock.try_lock() {
-                            //     Ok(guard) => guard,
-                            //     Err(_) => continue, // Retry if the lock couldn't be acquired immediately
-                            // };
-                            // *started = false;
-                            // break;
                             continue;
                         }
                     };
@@ -574,14 +575,23 @@ impl ShiftTool {
                 // println!("Sending data...");
                 // This sends the shift data read from the source device directly to the receivers
                 index = 0; // Reset the device index
-                for device in &receiver_devices {
+                for device in &mut receiver_devices {
                     let mut final_temp_buf: [u8; 3] = finalbuf.clone();
 
                     buf[1] = 0; buf[2] = 0;
                     // Reset the device state, this is so we can get a fresh REAL device state
                     match device.send_feature_report(&mut buf) {
                         Ok(bytes_written) => bytes_written,
-                        Err(_e) => continue,
+                        Err(_e) => {
+                            let hid_device = match hidapi.open_serial(shared_receivers[index].vendor_id, shared_receivers[index].product_id, &*shared_receivers[index].serial_number) {
+                                Ok(device) => device,
+                                Err(_) => continue,
+                            };
+
+                            // We were able to reopen the device so store it
+                            let _ = std::mem::replace(device, hid_device);
+                            continue;
+                        },
                     };
 
                     // Filter the final state for this device
@@ -764,51 +774,12 @@ impl ShiftTool {
             let _ = ui.label("Shift:   ");
             let mut color;
 
+            let device = if is_receiver { &mut self.config.data.receivers[i] } else { &mut self.config.data.sources[i] };
+
             if is_receiver {
                 {
                     let &(ref lock2, ref _cvar) = &*self.receiver_states[i];
                     state = *(lock2.lock().unwrap());
-                }
-
-                for j in 0..5 {
-                    let shift = read_bit(state, j);
-
-                    color = egui::Color32::default();
-                    if self.config.data.receivers[i].state_enabled[<u8 as Into<usize>>::into(j)] == false {
-                        color = DISABLED_COLOR;
-                    }
-                    if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
-                        self.config.data.receivers[i].state_enabled[<u8 as Into<usize>>::into(j)] = !self.config.data.receivers[i].state_enabled[<u8 as Into<usize>>::into(j)];
-                    };
-                }
-
-                // I'm not sure which of these 3 bits rep which mode
-                let dtnt = read_bit(state, 5);
-                let zoom = read_bit(state, 6);
-                let trim = read_bit(state, 7);
-
-                color = egui::Color32::default();
-                if self.config.data.receivers[i].state_enabled[5] == false {
-                    color = DISABLED_COLOR;
-                }
-                if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
-                    self.config.data.receivers[i].state_enabled[5] = !self.config.data.receivers[i].state_enabled[5];
-                }
-
-                color = egui::Color32::default();
-                if self.config.data.receivers[i].state_enabled[6] == false {
-                    color = DISABLED_COLOR;
-                }
-                if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
-                    self.config.data.receivers[i].state_enabled[6] = !self.config.data.receivers[i].state_enabled[6];
-                }
-
-                color = egui::Color32::default();
-                if self.config.data.receivers[i].state_enabled[7] == false {
-                    color = DISABLED_COLOR;
-                }
-                if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
-                    self.config.data.receivers[i].state_enabled[7] = !self.config.data.receivers[i].state_enabled[7];
                 }
             }
             else {
@@ -816,50 +787,50 @@ impl ShiftTool {
                     let &(ref lock2, ref _cvar) = &*self.source_states[i];
                     state = *(lock2.lock().unwrap());
                 }
-
-                for j in 0..5 {
-                    let shift = read_bit(state, j);
-
-                    color = egui::Color32::default();
-                    if self.config.data.sources[i].state_enabled[<u8 as Into<usize>>::into(j)] == false {
-                        color = DISABLED_COLOR;
-                    }
-                    if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
-                        self.config.data.sources[i].state_enabled[<u8 as Into<usize>>::into(j)] = !self.config.data.sources[i].state_enabled[<u8 as Into<usize>>::into(j)];
-                    };
-                }
-
-                // I'm not sure which of these 3 bits rep which mode
-                let dtnt = read_bit(state, 5);
-                let zoom = read_bit(state, 6);
-                let trim = read_bit(state, 7);
-
-                color = egui::Color32::default();
-                if self.config.data.sources[i].state_enabled[5] == false {
-                    color = DISABLED_COLOR;
-                }
-                if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
-                    self.config.data.sources[i].state_enabled[5] = !self.config.data.sources[i].state_enabled[5];
-                }
-
-                color = egui::Color32::default();
-                if self.config.data.sources[i].state_enabled[6] == false {
-                    color = DISABLED_COLOR;
-                }
-                if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
-                    self.config.data.sources[i].state_enabled[6] = !self.config.data.sources[i].state_enabled[6];
-                }
-
-                color = egui::Color32::default();
-                if self.config.data.sources[i].state_enabled[7] == false {
-                    color = DISABLED_COLOR;
-                }
-                if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
-                    self.config.data.sources[i].state_enabled[7] = !self.config.data.sources[i].state_enabled[7];
-                }
             }
 
-            let active = self.device_list[device_index].active;
+            for j in 0..5 {
+                let shift = read_bit(state, j);
+
+                color = egui::Color32::default();
+                if device.state_enabled[<u8 as Into<usize>>::into(j)] == false {
+                    color = DISABLED_COLOR;
+                }
+                if ui.selectable_label(shift, egui::RichText::new(format!("{}", j + 1)).background_color(color)).clicked() && !thread_running {
+                    device.state_enabled[<u8 as Into<usize>>::into(j)] = !device.state_enabled[<u8 as Into<usize>>::into(j)];
+                };
+            }
+
+            // I'm not sure which of these 3 bits rep which mode
+            let dtnt = read_bit(state, 5);
+            let zoom = read_bit(state, 6);
+            let trim = read_bit(state, 7);
+
+            color = egui::Color32::default();
+            if device.state_enabled[5] == false {
+                color = DISABLED_COLOR;
+            }
+            if ui.selectable_label(dtnt, egui::RichText::new("DTNT").background_color(color)).clicked() && !thread_running {
+                device.state_enabled[5] = !device.state_enabled[5];
+            }
+
+            color = egui::Color32::default();
+            if device.state_enabled[6] == false {
+                color = DISABLED_COLOR;
+            }
+            if ui.selectable_label(zoom, egui::RichText::new("ZOOM").background_color(color)).clicked() && !thread_running {
+                device.state_enabled[6] = !device.state_enabled[6];
+            }
+
+            color = egui::Color32::default();
+            if device.state_enabled[7] == false {
+                color = DISABLED_COLOR;
+            }
+            if ui.selectable_label(trim, egui::RichText::new("TRIM").background_color(color)).clicked() && !thread_running {
+                device.state_enabled[7] = !device.state_enabled[7];
+            }
+
+            let active = self.device_list[device_index].active && thread_running;
             let mut active_text = "OFFLINE";
             if active == true {
                 active_text = "ONLINE";
