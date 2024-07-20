@@ -80,19 +80,20 @@ fn merge_u8_into_u16(high: u8, low: u8) -> u16 {
     merged
 }
 
-fn is_supported(input: String) -> bool {
-    let args = Args::parse();
-    if args.skip_firmware {
-        return true;
-    }
-
-    let fixed_list = vec![
-        String::from("VIRPIL Controls 20220720"),
-        String::from("VIRPIL Controls 20230328"),
-        String::from("VIRPIL Controls 20240323"),
-    ];
-
-    fixed_list.contains(&input)
+fn is_supported(_input: String) -> bool {
+    true
+    // let args = Args::parse();
+    // if args.skip_firmware {
+    //     return true;
+    // }
+    //
+    // let fixed_list = vec![
+    //     String::from("VIRPIL Controls 20220720"),
+    //     String::from("VIRPIL Controls 20230328"),
+    //     String::from("VIRPIL Controls 20240323"),
+    // ];
+    //
+    // fixed_list.contains(&input)
 }
 
 fn calculate_full_device_name(device_info: &DeviceInfo) -> String {
@@ -313,9 +314,6 @@ impl ShiftTool {
             }
         }
 
-        // if hidapi.device_list().count() != self.device_list.len() {
-        //     self.device_list.clear();
-        // }
 
         let mut old_devices: Vec<VpcDevice> = vec![];
         let mut new_devices: Vec<VpcDevice> = vec![];
@@ -661,14 +659,7 @@ impl ShiftTool {
     }
 
     fn run(&mut self, ui: &mut Ui, ctx: &Context) {
-        let thread_running: bool;
-        {
-            {
-                // Check to see if the worker thread is running
-                let &(ref lock, ref _cvar) = &*self.thread_state;
-                thread_running = *(lock.lock().unwrap());
-            }
-        }
+        let thread_running = self.get_thread_status();
         let hidapi = HidApi::new_without_enumerate().expect("Was unable to open hid instance");
         self.refresh_devices(hidapi);
 
@@ -685,6 +676,16 @@ impl ShiftTool {
                 self.create_control_buttons(ctx, thread_running, columns);
             },
         );
+    }
+
+    fn get_thread_status(&mut self) -> bool {
+        {
+            {
+                // Check to see if the worker thread is running
+                let &(ref lock, ref _cvar) = &*self.thread_state;
+                *(lock.lock().unwrap())
+            }
+        }
     }
 
     fn create_source_dropdown(&mut self, thread_running: bool, columns: &mut [Ui]) {
@@ -871,43 +872,9 @@ impl ShiftTool {
                 }
 
                 if !is_started {
-                    if !self.spawn_worker() {
-                        {
-                            let &(ref lock, ref cvar) = &*self.thread_state;
-                            let mut started = lock.lock().unwrap();
-                            *started = false;
-                            cvar.notify_all();
-                        }
-                    }
+                    self.start_worker();
                 } else {
-                    for source_state in self.source_states.clone() {
-                        {
-                            // reset each source state
-                            let &(ref lock, ref cvar) = &*source_state;
-                            let mut state = lock.lock().unwrap();
-                            *state = 0;
-                            cvar.notify_all();
-                        }
-                    }
-                    for receiver_state in self.receiver_states.clone() {
-                        {
-                            // reset each source state
-                            let &(ref lock, ref cvar) = &*receiver_state;
-                            let mut state = lock.lock().unwrap();
-                            *state = 0;
-                            cvar.notify_all();
-                        }
-                    }
-                    {
-                        // reset result state
-                        let &(ref lock, ref cvar) = &*self.shift_state;
-                        let mut state = lock.lock().unwrap();
-                        *state = 0;
-                        cvar.notify_all();
-                    }
-                    for i in 0..self.device_list.len() {
-                        self.device_list[i].active = false;
-                    }
+                    self.stop_worker();
                 }
 
                 let _ = self.config.save();
@@ -938,6 +905,48 @@ impl ShiftTool {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
+    }
+
+    fn start_worker(&mut self) {
+        if !self.spawn_worker() {
+            {
+                let &(ref lock, ref cvar) = &*self.thread_state;
+                let mut started = lock.lock().unwrap();
+                *started = false;
+                cvar.notify_all();
+            }
+        }
+    }
+
+    fn stop_worker(&mut self) {
+        for source_state in self.source_states.clone() {
+            {
+                // reset each source state
+                let &(ref lock, ref cvar) = &*source_state;
+                let mut state = lock.lock().unwrap();
+                *state = 0;
+                cvar.notify_all();
+            }
+        }
+        for receiver_state in self.receiver_states.clone() {
+            {
+                // reset each source state
+                let &(ref lock, ref cvar) = &*receiver_state;
+                let mut state = lock.lock().unwrap();
+                *state = 0;
+                cvar.notify_all();
+            }
+        }
+        {
+            // reset result state
+            let &(ref lock, ref cvar) = &*self.shift_state;
+            let mut state = lock.lock().unwrap();
+            *state = 0;
+            cvar.notify_all();
+        }
+        for i in 0..self.device_list.len() {
+            self.device_list[i].active = false;
+        }
     }
 
     fn remove_receiver(&mut self) {
