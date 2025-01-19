@@ -60,4 +60,4 @@ install: shift_tool_install
 # Clean target
 clean: driver_clean tools_clean
 
-.PHONY: driver tools shift_tool
+.PHONY: driver tools shift_tool shift_tool_install
