@@ -18,7 +18,8 @@ build:
 	cargo build $(release)
 
 install:
-	cp target/$(target)/$(prog) ~/bin/$(prog)$(extension)
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 0755 target/$(target)/$(prog)$(extension) $(DESTDIR)$(PREFIX)/bin
 
 clean:
 	cargo clean
