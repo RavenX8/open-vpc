@@ -14,6 +14,10 @@ else
   extension :=
 endif
 
+ifeq ($(PREFIX),)
+    PREFIX := /usr/local
+endif
+
 build:
 	cargo build $(release)
 
