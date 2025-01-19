@@ -50,6 +50,13 @@ shift_tool_clean:
 	@echo "========================================"
 	$(MAKE) -C "$(shell pwd)/tools/shift_tool" clean
 
+shift_tool_install:
+	@echo -e "\n::\033[32m Installing OpenVPC shift tool\033[0m"
+	@echo "========================================"
+	$(MAKE) -C "$(shell pwd)/tools/shift_tool" install
+
+install: shift_tool_install
+
 # Clean target
 clean: driver_clean tools_clean
 
