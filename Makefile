@@ -40,7 +40,17 @@ tools_clean:
 	@echo "========================================"
 	$(MAKE) -C "$(shell pwd)/tools" clean
 
+shift_tool:
+	@echo -e "\n::\033[32m Compiling OpenVPC shift tool\033[0m"
+	@echo "========================================"
+	$(MAKE) -C "$(shell pwd)/tools/shift_tool"
+
+shift_tool_clean:
+	@echo -e "\n::\033[32m Cleaning OpenVPC shift tool\033[0m"
+	@echo "========================================"
+	$(MAKE) -C "$(shell pwd)/tools/shift_tool" clean
+
 # Clean target
 clean: driver_clean tools_clean
 
-.PHONY: driver tools
+.PHONY: driver tools shift_tool
