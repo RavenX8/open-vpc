@@ -58,7 +58,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         PROGRAM_TITLE,
         options,
-        Box::new(|_cc| Box::new(ShiftTool::default())),
+        Box::new(|_cc| Ok(Box::new(ShiftTool::default()))),
     )
 }
 
@@ -693,7 +693,7 @@ impl ShiftTool {
             let source_device = self.find_source_device_index(i);
             columns[0].horizontal(|ui| {
                 let _ = ui.label(format!("Source {}", i + 1));
-                egui::ComboBox::from_id_source(format!("Source {}", i + 1))
+                egui::ComboBox::from_id_salt(format!("Source {}", i + 1))
                     .width(500.0)
                     .selected_text(format!("{}", &self.device_list[source_device]))
                     .show_ui(ui, |ui| {
@@ -755,7 +755,7 @@ impl ShiftTool {
         for i in 0..self.config.data.receivers.len() {
             let receiver_device = self.find_receiver_device_index(i);
             columns[0].horizontal(|ui| {
-                egui::ComboBox::from_id_source(i)
+                egui::ComboBox::from_id_salt(i)
                     .width(500.0)
                     .selected_text(format!("{}", &self.device_list[receiver_device]))
                     .show_ui(ui, |ui| {
